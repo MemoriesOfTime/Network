@@ -7,7 +7,7 @@
     <groupId>com.nukkitx.network</groupId>
     <artifactId>network-parent</artifactId>
     <packaging>pom</packaging>
-    <version>1.6.28-SNAPSHOT</version>
+    <version>1.6.28-MOT-SNAPSHOT</version>
     <inceptionYear>2018</inceptionYear>
     <url>https://github.com/NukkitX/Network</url>
 
@@ -50,6 +50,13 @@
         <developerConnection>scm:git:ssh://github.com:NukkitX/Network.git</developerConnection>
         <url>https://github.com/NukkitX/Network</url>
     </scm>
+
+    <distributionManagement>
+        <repository>
+            <id>maven-repo</id>
+            <url>file:/www/wwwroot/repo.lanink.cn</url>
+        </repository>
+    </distributionManagement>
 
     <repositories>
         <repository>
