@@ -29,7 +29,7 @@ public class RakNetConstants {
     /**
      * Time after {@link RakNetSession} is closed due to no activity.
      */
-    public static final int SESSION_TIMEOUT_MS = 30000;
+    public static final int SESSION_TIMEOUT_MS = 25000;
     /**
      * Time after {@link RakNetSession} is refreshed due to no activity.
      */
@@ -42,7 +42,7 @@ public class RakNetConstants {
      * How many Stale Datagrams a {@link RakNetSession} can hold before been
      * forcefully closed
      */
-    public static final int MAXIMUM_STALE_DATAGRAMS = 512;
+    public static final int MAXIMUM_STALE_DATAGRAMS = 2000;
 
     /*
         Flags
