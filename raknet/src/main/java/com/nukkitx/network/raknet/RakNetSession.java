@@ -143,6 +143,7 @@ public abstract class RakNetSession implements SessionConnection<ByteBuf> {
         }
     }
 
+    @Override
     public InetSocketAddress getAddress() {
         return this.address;
     }
@@ -167,6 +168,7 @@ public abstract class RakNetSession implements SessionConnection<ByteBuf> {
         return this.protocolVersion;
     }
 
+    @Override
     public long getPing() {
         return this.lastPongTime - this.lastPingTime;
     }
@@ -953,6 +955,7 @@ public abstract class RakNetSession implements SessionConnection<ByteBuf> {
         Preconditions.checkState(!this.isClosed(), "Session already closed");
     }
 
+    @Override
     public boolean isClosed() {
         return this.closed;
     }
