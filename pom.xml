@@ -23,7 +23,7 @@
         <maven.compiler.target>1.8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.build.timestamp.format>HHmm-ddMMyyyy</maven.build.timestamp.format>
-        <netty.version>4.1.96.Final</netty.version>
+        <netty.version>4.1.101.Final</netty.version>
         <junit.version>5.4.2</junit.version>
     </properties>
 
@@ -52,9 +52,13 @@
     </scm>
 
     <distributionManagement>
+        <snapshotRepository>
+            <id>repo-lanink-cn</id>
+            <url>https://repo.lanink.cn/repository/maven-snapshots/</url>
+        </snapshotRepository>
         <repository>
-            <id>maven-repo</id>
-            <url>file:/www/wwwroot/repo.lanink.cn</url>
+            <id>repo-lanink-cn</id>
+            <url>https://repo.lanink.cn/repository/maven-releases/</url>
         </repository>
     </distributionManagement>
 
