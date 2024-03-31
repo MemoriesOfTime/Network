@@ -5,15 +5,22 @@ import com.nukkitx.network.util.DisconnectReason;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import javax.annotation.ParametersAreNonnullByDefault;
 import java.net.InetSocketAddress;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.nukkitx.network.raknet.RakNetConstants.*;
 
 @ParametersAreNonnullByDefault
 public class RakNetServerSession extends RakNetSession {
+
+    private static final InternalLogger log = InternalLoggerFactory.getInstance(RakNetServerSession.class);
     private final RakNetServer rakNet;
+
+    private final AtomicInteger retriesCounter = new AtomicInteger(5);
 
     RakNetServerSession(RakNetServer rakNet, InetSocketAddress remoteAddress, Channel channel, EventLoop eventLoop, int mtu,
                         int protocolVersion) {
@@ -73,19 +80,24 @@ public class RakNetServerSession extends RakNetSession {
     }
 
     private void onConnectionRequest(ByteBuf buffer) {
+        if (this.getState().ordinal() > RakNetState.CONNECTING.ordinal()) {
+            return;
+        }
         long guid = buffer.readLong();
         long time = buffer.readLong();
         boolean security = buffer.readBoolean();
 
-        if (this.guid != guid || security) {
+        if (this.retriesCounter.decrementAndGet() < 0) {
             this.sendConnectionFailure(ID_CONNECTION_REQUEST_FAILED);
             this.close(DisconnectReason.CONNECTION_REQUEST_FAILED);
-            return;
+            log.warn("[{}] Connection request failed due to too many retries", this.channel.remoteAddress());
+        } else if (this.guid != guid || security) {
+            this.sendConnectionFailure(ID_CONNECTION_REQUEST_FAILED);
+            this.close(DisconnectReason.CONNECTION_REQUEST_FAILED);
+        } else {
+            this.setState(RakNetState.CONNECTING);
+            this.sendConnectionRequestAccepted(time);
         }
-
-        this.setState(RakNetState.CONNECTING);
-
-        this.sendConnectionRequestAccepted(time);
     }
 
     private void onNewIncomingConnection() {
@@ -144,7 +156,6 @@ public class RakNetServerSession extends RakNetSession {
 
         buffer.writeLong(time);
         buffer.writeLong(System.currentTimeMillis());
-
-        this.send(buffer, RakNetPriority.IMMEDIATE, RakNetReliability.RELIABLE);
+        this.send(buffer, RakNetPriority.IMMEDIATE, RakNetReliability.UNRELIABLE);
     }
 }

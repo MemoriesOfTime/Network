@@ -5,7 +5,7 @@
     <parent>
         <artifactId>network-parent</artifactId>
         <groupId>com.nukkitx.network</groupId>
-        <version>1.6.28-MOT-SNAPSHOT</version>
+        <version>1.6.28.1-MOT</version>
     </parent>
     <modelVersion>4.0.0</modelVersion>
 
@@ -38,7 +38,7 @@
         <dependency>
             <groupId>net.jodah</groupId>
             <artifactId>expiringmap</artifactId>
-            <version>0.5.10</version>
+            <version>0.5.11</version>
             <scope>compile</scope>
         </dependency>
     </dependencies>

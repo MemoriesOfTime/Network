@@ -1,5 +1,7 @@
 package com.nukkitx.network.raknet;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.Unpooled;
 import lombok.experimental.UtilityClass;
 
 import java.net.Inet4Address;
@@ -43,6 +45,18 @@ public class RakNetConstants {
      * forcefully closed
      */
     public static final int MAXIMUM_STALE_DATAGRAMS = 2000;
+    /**
+     * A number of datagram packets each address can send within one RakNet tick (10ms)
+     */
+    public static final int DEFAULT_PACKET_LIMIT = 120;
+    /**
+     * A number of "unconnected" datagram packets each address can send within one second.
+     */
+    public static final int DEFAULT_OFFLINE_PACKET_LIMIT = 10;
+    /**
+     * A number of all datagrams that will be handled within one RakNet tick before server starts dropping any incoming data.
+     */
+    public static final int DEFAULT_GLOBAL_PACKET_LIMIT = 100000;
 
     /*
         Flags
@@ -89,6 +103,8 @@ public class RakNetConstants {
     static final byte[] RAKNET_UNCONNECTED_MAGIC = new byte[]{
             0, -1, -1, 0, -2, -2, -2, -2, -3, -3, -3, -3, 18, 52, 86, 120
     };
+
+    public static final ByteBuf unconnectedMagic = Unpooled.wrappedBuffer(RAKNET_UNCONNECTED_MAGIC);
 
     /*
         Congestion Control related constants

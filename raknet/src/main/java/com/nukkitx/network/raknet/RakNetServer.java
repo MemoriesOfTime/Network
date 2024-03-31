@@ -47,6 +47,7 @@ public class RakNetServer extends RakNet {
     private final ServerChannelInitializer initializer = new ServerChannelInitializer();
     private final ServerMessageHandler messageHandler = new ServerMessageHandler(this);
     private final ProxyServerHandler proxyServerHandler;
+    private final RakServerOfflineHandler serverOfflineHandler = new RakServerOfflineHandler(this);
     private final ServerDatagramHandler serverDatagramHandler = new ServerDatagramHandler(this);
     private final RakExceptionHandler exceptionHandler = new RakExceptionHandler(this);
 
@@ -173,6 +174,16 @@ public class RakNetServer extends RakNet {
         this.blockAddresses.put(address, System.currentTimeMillis() + timeUnit.toMillis(timeout));
     }
 
+    public boolean tryBlockAddress(InetAddress address, long time, TimeUnit unit) {
+        for (Channel channel : this.channels) {
+            RakServerRateLimiter rateLimiter = channel.pipeline().get(RakServerRateLimiter.class);
+            if (rateLimiter != null) {
+                return rateLimiter.blockAddress(address, time, unit);
+            }
+        }
+        return false;
+    }
+
     public boolean unblock(InetAddress address) {
         Objects.requireNonNull(address, "address");
         return this.blockAddresses.remove(address) != null;
@@ -277,6 +288,8 @@ public class RakNetServer extends RakNet {
                 pipeline.addLast(ProxyServerHandler.NAME, RakNetServer.this.proxyServerHandler);
             }
             pipeline.addLast(RakOutboundHandler.NAME, new RakOutboundHandler(RakNetServer.this));
+            pipeline.addLast(RakServerRateLimiter.NAME, new RakServerRateLimiter(RakNetServer.this));
+            pipeline.addLast(RakServerOfflineHandler.NAME, RakNetServer.this.serverOfflineHandler);
             pipeline.addLast(ServerMessageHandler.NAME, RakNetServer.this.messageHandler);
             pipeline.addLast(ServerDatagramHandler.NAME, RakNetServer.this.serverDatagramHandler);
             pipeline.addLast(RakExceptionHandler.NAME, RakNetServer.this.exceptionHandler);
