@@ -19,12 +19,14 @@ import javax.annotation.ParametersAreNonnullByDefault;
 import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
-import java.util.*;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
 
 import static com.nukkitx.network.raknet.RakNetConstants.*;
 
@@ -47,7 +49,6 @@ public class RakNetServer extends RakNet {
     private final ServerChannelInitializer initializer = new ServerChannelInitializer();
     private final ServerMessageHandler messageHandler = new ServerMessageHandler(this);
     private final ProxyServerHandler proxyServerHandler;
-    private final RakServerOfflineHandler serverOfflineHandler = new RakServerOfflineHandler(this);
     private final ServerDatagramHandler serverDatagramHandler = new ServerDatagramHandler(this);
     private final RakExceptionHandler exceptionHandler = new RakExceptionHandler(this);
 
@@ -175,13 +176,16 @@ public class RakNetServer extends RakNet {
     }
 
     public boolean tryBlockAddress(InetAddress address, long time, TimeUnit unit) {
+        boolean result = false;
         for (Channel channel : this.channels) {
             RakServerRateLimiter rateLimiter = channel.pipeline().get(RakServerRateLimiter.class);
             if (rateLimiter != null) {
-                return rateLimiter.blockAddress(address, time, unit);
+                if (rateLimiter.blockAddress(address, time, unit)) {
+                    result = true;
+                }
             }
         }
-        return false;
+        return result;
     }
 
     public boolean unblock(InetAddress address) {
@@ -289,7 +293,7 @@ public class RakNetServer extends RakNet {
             }
             pipeline.addLast(RakOutboundHandler.NAME, new RakOutboundHandler(RakNetServer.this));
             pipeline.addLast(RakServerRateLimiter.NAME, new RakServerRateLimiter(RakNetServer.this));
-            pipeline.addLast(RakServerOfflineHandler.NAME, RakNetServer.this.serverOfflineHandler);
+            pipeline.addLast(RakServerOfflineHandler.NAME, new RakServerOfflineHandler(RakNetServer.this));
             pipeline.addLast(ServerMessageHandler.NAME, RakNetServer.this.messageHandler);
             pipeline.addLast(ServerDatagramHandler.NAME, RakNetServer.this.serverDatagramHandler);
             pipeline.addLast(RakExceptionHandler.NAME, RakNetServer.this.exceptionHandler);

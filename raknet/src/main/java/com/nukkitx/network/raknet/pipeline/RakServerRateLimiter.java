@@ -36,7 +36,7 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
     public static final String NAME = "rak-server-rate-limiter";
     private static final InternalLogger log = InternalLoggerFactory.getInstance(RakServerRateLimiter.class);
 
-    private final RakNetServer channel;
+    private final RakNetServer server;
 
     private final ConcurrentHashMap<InetAddress, AtomicInteger> rateLimitMap = new ConcurrentHashMap<>();
     private final Map<InetAddress, Long> blockedConnections = new ConcurrentHashMap<>();
@@ -48,8 +48,8 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
     private ScheduledFuture<?> tickFuture;
     private ScheduledFuture<?> blockedTickFuture;
 
-    public RakServerRateLimiter(RakNetServer channel) {
-        this.channel = channel;
+    public RakServerRateLimiter(RakNetServer server) {
+        this.server = server;
     }
 
     @Override
