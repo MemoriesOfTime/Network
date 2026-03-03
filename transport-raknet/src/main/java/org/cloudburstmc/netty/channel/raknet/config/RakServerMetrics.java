@@ -42,6 +42,9 @@ public interface RakServerMetrics {
     default void addressUnblocked(InetAddress address) {
     }
 
+    default void invalidCookie(InetSocketAddress address) {
+    }
+ 
     default void bytesIn(RakChildChannel channel, int count) {
     }
 
