@@ -155,7 +155,7 @@ public class SipHash {
     }
 
     public boolean validateCookie(int cookie, InetSocketAddress sender, RakServerCookieMode mode) {
-        if (mode == RakServerCookieMode.OFF) {
+        if (mode == RakServerCookieMode.OFF || mode == RakServerCookieMode.STATELESS) {
             return true;
         }
 

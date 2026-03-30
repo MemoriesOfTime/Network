@@ -124,17 +124,39 @@ public class RakCookieTests {
     }
 
     @Test
-    public void testInvalidMode() {
-        // INVALID mode: Server sends no cookie request, expects no cookie.
+    public void testNoneMode() {
+        // NONE mode: Server sends no cookie, expects none. No version recovery possible.
         // Cookie requirement: completely absent.
-        setupServer(RakServerCookieMode.INVALID, null);
+        setupServer(RakServerCookieMode.NONE, null);
 
         Channel client = clientBootstrap()
                 .connect(new InetSocketAddress("127.0.0.1", PORT))
                 .awaitUninterruptibly()
                 .channel();
 
-        Assertions.assertTrue(client.isActive(), "Client should connect in INVALID (no cookie) mode");
+        Assertions.assertTrue(client.isActive(), "Client should connect in NONE (no cookie) mode");
+        client.close().awaitUninterruptibly();
+    }
+
+    @Test
+    public void testStatelessMode() throws InterruptedException {
+        // STATELESS mode: Server sends a cookie and reads it back, recovering the protocol version,
+        // but does not validate the signature.
+        setupServer(RakServerCookieMode.STATELESS, SECRET);
+
+        Channel client = clientBootstrap()
+                .connect(new InetSocketAddress("127.0.0.1", PORT))
+                .awaitUninterruptibly()
+                .channel();
+
+        Assertions.assertTrue(client.isActive(), "Client should connect in STATELESS mode");
+
+        Channel accepted = acceptedChannels.poll(1, TimeUnit.SECONDS);
+        Assertions.assertNotNull(accepted, "Server should create a child channel in STATELESS mode");
+        Assertions.assertEquals(
+                PROTOCOL_VERSION,
+                accepted.config().getOption(RakChannelOption.RAK_PROTOCOL_VERSION),
+                "STATELESS mode should recover RakNet protocol version from the cookie");
         client.close().awaitUninterruptibly();
     }
 
@@ -166,14 +188,14 @@ public class RakCookieTests {
         SipHash sipHash = new SipHash(SECRET);
         int validCookie = sipHash.generateStatelessCookie(serverAddress, PROTOCOL_VERSION); // Gives valid signature
         // Corrupt the signature (top 24 bits), keep combined byte (bottom 8 bits: time + proto)
-        int forgedCookie = (validCookie & 0xFF) | 0xABCDEF00; 
+        int forgedCookie = (validCookie & 0xFF) | 0xABCDEF00;
 
         ByteBuf ocr2 = createOCR2(rawClient.localAddress(), serverAddress, forgedCookie, true);
         rawClient.writeAndFlush(new DatagramPacket(ocr2, serverAddress));
 
         DatagramPacket response = responses.poll(1, TimeUnit.SECONDS);
         Assertions.assertNotNull(response, "Server should respond to OCR2 in OFFLOADED mode with valid timestamp");
-        
+
         ByteBuf content = response.content();
         Assertions.assertEquals(ID_OPEN_CONNECTION_REPLY_2, content.getUnsignedByte(0));
         response.release();
@@ -258,7 +280,7 @@ public class RakCookieTests {
         int proto = (PROTOCOL_VERSION - 1) & 0x0F;
         int combined = (time << 4) | proto;
 
-        int invalidCookie = 0xABCDEF00 | combined; 
+        int invalidCookie = 0xABCDEF00 | combined;
 
         ByteBuf ocr2 = createOCR2(rawClient.localAddress(), serverAddress, invalidCookie, true);
         rawClient.writeAndFlush(new DatagramPacket(ocr2, serverAddress));
@@ -318,11 +340,11 @@ public class RakCookieTests {
         // Epoch 1: Time 10 minutes (600 seconds)
         sipHash.setTime(TimeUnit.MINUTES.toMillis(10));
         int cookieEpoch1 = sipHash.generateStatelessCookie(sender, PROTOCOL_VERSION);
-        
+
         // Ensure signatures are different for the same input address/timestamp-slot        
         int sig0 = (cookieEpoch0 >>> 8) & 0xFFFFFF;
         int sig1 = (cookieEpoch1 >>> 8) & 0xFFFFFF;
-        
+
         Assertions.assertNotEquals(sig0, sig1, "Signatures must differ between epochs due to key rotation");
     }
 
@@ -338,14 +360,14 @@ public class RakCookieTests {
         // Time: 9 minutes 50 seconds (Epoch 0)
         long timeGen = TimeUnit.MINUTES.toMillis(9) + TimeUnit.SECONDS.toMillis(50);
         sipHash.setTime(timeGen);
-        
+
         int cookie = sipHash.generateStatelessCookie(sender, PROTOCOL_VERSION);
 
         // Time: 10 minutes 10 seconds (Epoch 1)
         // This is 20 seconds later real-time, across the 10-minute Epoch boundary and within the 2-minute validity window.
         long timeVerify = TimeUnit.MINUTES.toMillis(10) + TimeUnit.SECONDS.toMillis(10);
         sipHash.setTime(timeVerify);
-        
+
         boolean valid = sipHash.validateCookie(cookie, sender, RakServerCookieMode.ACTIVE);
         Assertions.assertTrue(valid, "Cookie from previous epoch (within valid window) should be accepted");
     }
@@ -364,7 +386,7 @@ public class RakCookieTests {
 
         // Time: 7 minutes + 1ms (Diff > 2 minutes)
         sipHash.setTime(TimeUnit.MINUTES.toMillis(7) + 1000); // 2 mins and 1 sec later
-        
+
         boolean valid = sipHash.validateCookie(cookie, sender, RakServerCookieMode.ACTIVE);
         Assertions.assertFalse(valid, "Cookie should expire after 2 minutes");
     }

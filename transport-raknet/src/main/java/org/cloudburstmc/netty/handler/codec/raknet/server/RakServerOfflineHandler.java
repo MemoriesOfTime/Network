@@ -156,7 +156,9 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
         // TODO: banned address check?
         // TODO: max connections check?
 
-        boolean sendCookie = config.getCookieMode() == RakServerCookieMode.ACTIVE;
+        boolean sendCookie = config.getCookieMode() != RakServerCookieMode.OFFLOADED
+                && config.getCookieMode() != RakServerCookieMode.OFFLOADED_PSK
+                && config.getCookieMode() != RakServerCookieMode.NONE;
 
         int bufferCapacity = sendCookie ? 32 : 28; // 4 byte cookie
 
@@ -182,11 +184,12 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
         // Skip already verified magic
         buffer.skipBytes(magicBuf.readableBytes());
 
-        boolean expectCookie = config.getCookieMode() != RakServerCookieMode.INVALID;
+        boolean expectCookie = config.getCookieMode() != RakServerCookieMode.NONE;
         int cookie = 0;
         if (expectCookie) {
             cookie = buffer.readInt();
-            if (!config.getSipHash().validateCookie(cookie, sender, mode)) {
+            boolean validateCookie = mode != RakServerCookieMode.STATELESS && mode != RakServerCookieMode.OFF;
+            if (validateCookie && !config.getSipHash().validateCookie(cookie, sender, mode)) {
                 if (log.isTraceEnabled()) {
                     log.trace("[{}] Received ID_OPEN_CONNECTION_REQUEST_2 with invalid cookie (Mode: {})", sender, mode);
                 }
@@ -220,12 +223,7 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
             return;
         }
 
-        int protocolVersion = 0;
-        if (mode == RakServerCookieMode.ACTIVE
-                || mode == RakServerCookieMode.OFFLOADED
-                || mode == RakServerCookieMode.OFFLOADED_PSK) {
-            protocolVersion = SipHash.getProtocolVersion(cookie);
-        }
+        int protocolVersion = expectCookie ? SipHash.getProtocolVersion(cookie) : 0;
 
         RakServerChannel serverChannel = (RakServerChannel) ctx.channel();
         RakChildChannel channel = serverChannel.createChildChannel(sender, packet.recipient(), clientGuid, mtu, protocolVersion);

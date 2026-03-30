@@ -77,14 +77,19 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
      * Create new child channel assigned to remote address.
      *
      * @param address         remote address of new connection.
+     * @param localAddress    local address the connection was received on.
+     * @param clientGuid      unique GUID of the connecting client.
+     * @param mtu             negotiated MTU for this connection.
      * @param protocolVersion RakNet protocol version from the handshake cookie, or 0 if not available.
      * @return RakChildChannel instance of new channel, or {@code null} if a non-replaceable channel already exists.
      */
     public RakChildChannel createChildChannel(InetSocketAddress address, InetSocketAddress localAddress, long clientGuid, int mtu, int protocolVersion) {
         RakChildChannel existingChannel = this.childChannelMap.get(address);
-        if (this.config().getCookieMode() != RakServerCookieMode.INVALID &&
-                this.config().getCookieMode() != RakServerCookieMode.OFF && existingChannel != null) {
-            // We know this player is coming from this IP address due to the cookie, so we can safely close the existing channel.
+        RakServerCookieMode cookieMode = this.config().getCookieMode();
+        boolean trustedIp = cookieMode != RakServerCookieMode.NONE
+                && cookieMode != RakServerCookieMode.STATELESS
+                && cookieMode != RakServerCookieMode.OFF;
+        if (trustedIp && existingChannel != null) {
             existingChannel.close();
         } else if (existingChannel != null) {
             // Could be spoofed, so we don't close the existing channel.

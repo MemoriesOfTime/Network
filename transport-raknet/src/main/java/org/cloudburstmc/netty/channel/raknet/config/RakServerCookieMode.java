@@ -17,32 +17,39 @@
 package org.cloudburstmc.netty.channel.raknet.config;
 
 public enum RakServerCookieMode {
-    
+
     /**
-     * Key is generated and managed by the server. 
+     * Key is generated and managed by the server.
      * Handles and responds to ID_OPEN_CONNECTION_REQUEST_1 with a stateless cookie.
      */
     ACTIVE,
-    
+
     /**
      * Key is unknown. Ignores ID_OPEN_CONNECTION_REQUEST_1.
      * On ID_OPEN_CONNECTION_REQUEST_2, verifies timestamp is recent. Signature is ignored.
      */
     OFFLOADED,
-    
+
     /**
      * Key is known. Ignores ID_OPEN_CONNECTION_REQUEST_1.
      * On ID_OPEN_CONNECTION_REQUEST_2, verifies timestamp is recent and checks cookie signature.
      */
     OFFLOADED_PSK,
-    
+
     /**
      * Accepts any cookie at ID_OPEN_CONNECTION_REQUEST_2.
      */
     OFF,
 
-    /*
-     * Client is invalid if it sends a cookie.
+    /**
+     * No cookie is sent or expected. The RakNet protocol version cannot be
+     * recovered in this mode.
      */
-    INVALID
+    NONE,
+
+    /**
+     * Handles the full cookie handshake and recovers the RakNet protocol version
+     * from the cookie, but does not validate the signature.
+     */
+    STATELESS
 }
