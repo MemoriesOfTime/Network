@@ -44,7 +44,7 @@ subprojects {
 
     configure<JavaPluginExtension> {
         toolchain {
-            languageVersion.set(JavaLanguageVersion.of(8))
+            languageVersion.set(JavaLanguageVersion.of(17))
         }
         withJavadocJar()
         withSourcesJar()
@@ -110,8 +110,9 @@ subprojects {
     }
 
     tasks {
-        named<JavaCompile>("compileJava") {
+        withType<JavaCompile>().configureEach {
             options.encoding = "UTF-8"
+            options.release.set(17)
         }
         named<Test>("test") {
             minHeapSize = "512m"

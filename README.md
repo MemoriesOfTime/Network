@@ -8,6 +8,10 @@ Network components used within Cloudburst projects.
 
 - [`netty-transport-raknet`](transport-raknet/README.md) - A RakNet implementation based on Netty patterns
 
+### Requirements
+
+- Java 17+
+
 ### Maven
 
 ##### Repository:
