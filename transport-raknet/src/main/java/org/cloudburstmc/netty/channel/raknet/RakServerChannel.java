@@ -119,7 +119,7 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
 
     private void onChildClosed(ChannelFuture channelFuture) {
         RakChildChannel channel = (RakChildChannel) channelFuture.channel();
-        this.childChannelMap.remove(channel.remoteAddress());
+        this.childChannelMap.remove(channel.remoteAddress(), channel);
 
         if (this.config().getMetrics() != null) {
             this.config().getMetrics().channelClose(channel.remoteAddress());

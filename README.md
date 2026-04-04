@@ -12,7 +12,6 @@ Network components used within Cloudburst projects.
 
 ##### Repository:
 
-For releases, use Maven Central.
 Snapshots can be found in the repository below.
 
 <details open>
@@ -20,7 +19,7 @@ Snapshots can be found in the repository below.
 
 ```kotlin
 repositories {
-    maven("https://repo.opencollab.dev/maven-snapshots/")
+    maven("https://repo.mot.dev/maven-snapshots")
 }
 ```
 
@@ -31,7 +30,7 @@ repositories {
 ```groovy
 repositories {
     maven {
-        url 'https://repo.opencollab.dev/maven-snapshots/'
+        url 'https://repo.mot.dev/maven-snapshots'
     }
 }
 ```
@@ -44,11 +43,10 @@ repositories {
 
 <repositories>
   <repository>
-    <id>opencollab-snapshots</id>
-    <url>https://repo.opencollab.dev/maven-snapshots/</url>
+    <id>mot-snapshots</id>
+    <url>https://repo.mot.dev/maven-snapshots</url>
   </repository>
 </repositories>
 ```
 
 </details>
-

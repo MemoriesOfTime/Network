@@ -19,12 +19,27 @@ subprojects {
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
 
-    group = "org.cloudburstmc.netty"
+    group = "dev.mot.netty"
     version = rootProject.property("version") as String
+    val isSnapshotVersion = version.toString().endsWith("SNAPSHOT")
+    val publishRepositoryName = if (isSnapshotVersion) "mot-repo-snapshot" else "mot-repo-release"
+    val publishRepositoryUrl = if (isSnapshotVersion) {
+        "https://repo.mot.dev/repository/maven-snapshots/"
+    } else {
+        "https://repo.mot.dev/repository/maven-releases/"
+    }
 
     repositories {
         mavenLocal()
         mavenCentral()
+        maven {
+            name = "mot-repo-release"
+            url = uri("https://repo.mot.dev/repository/maven-releases/")
+        }
+        maven {
+            name = "mot-repo-snapshot"
+            url = uri("https://repo.mot.dev/repository/maven-snapshots/")
+        }
     }
 
     configure<JavaPluginExtension> {
@@ -38,11 +53,8 @@ subprojects {
     configure<PublishingExtension> {
         repositories {
             maven {
-                name = "maven-deploy"
-                url = uri(
-                        System.getenv("MAVEN_DEPLOY_URL")
-                                ?: "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
-                )
+                name = publishRepositoryName
+                url = uri(publishRepositoryUrl)
                 credentials {
                     username = System.getenv("MAVEN_DEPLOY_USERNAME") ?: "username"
                     password = System.getenv("MAVEN_DEPLOY_PASSWORD") ?: "password"
