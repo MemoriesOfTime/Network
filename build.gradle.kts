@@ -33,6 +33,14 @@ subprojects {
         mavenLocal()
         mavenCentral()
         maven {
+            name = "opencollab-releases"
+            url = uri("https://repo.opencollab.dev/maven-releases/")
+        }
+        maven {
+            name = "opencollab-snapshots"
+            url = uri("https://repo.opencollab.dev/maven-snapshots/")
+        }
+        maven {
             name = "mot-repo-release"
             url = uri("https://repo.mot.dev/repository/maven-releases/")
         }

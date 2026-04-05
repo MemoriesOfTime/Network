@@ -21,3 +21,5 @@ plugins {
 }
 
 include("transport-raknet")
+include("codec-query")
+include("codec-rcon")
