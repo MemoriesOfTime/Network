@@ -205,7 +205,7 @@ public class RakCookieTests {
                 PROTOCOL_VERSION,
                 accepted.config().getOption(RakChannelOption.RAK_PROTOCOL_VERSION),
                 "OFFLOADED mode should recover RakNet protocol version from the cookie");
-        rawClient.close();
+        rawClient.close().awaitUninterruptibly();
     }
 
     @Test
@@ -249,7 +249,7 @@ public class RakCookieTests {
                 PROTOCOL_VERSION,
                 accepted.config().getOption(RakChannelOption.RAK_PROTOCOL_VERSION),
                 "OFFLOADED_PSK mode should recover RakNet protocol version from the cookie");
-        rawClient.close();
+        rawClient.close().awaitUninterruptibly();
     }
 
     @Test
@@ -287,7 +287,7 @@ public class RakCookieTests {
 
         DatagramPacket response = responses.poll(500, TimeUnit.MILLISECONDS);
         Assertions.assertNull(response, "Server should NOT respond to OCR2 with invalid PSK signature");
-        rawClient.close();
+        rawClient.close().awaitUninterruptibly();
     }
 
     @Test
@@ -323,6 +323,166 @@ public class RakCookieTests {
         Assertions.assertEquals(ID_OPEN_CONNECTION_REPLY_2, response.content().getUnsignedByte(0));
         response.release();
         rawClient.close();
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest1StillReceivesReplies() throws InterruptedException {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+
+        InetSocketAddress serverAddress = new InetSocketAddress("127.0.0.1", PORT);
+        BlockingQueue<DatagramPacket> responses = new LinkedBlockingQueue<>();
+
+        Channel rawClient = new Bootstrap()
+                .group(group)
+                .channel(NioDatagramChannel.class)
+                .handler(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        if (msg instanceof DatagramPacket) {
+                            responses.add(((DatagramPacket) msg).retain());
+                        }
+                    }
+                })
+                .bind(new InetSocketAddress("127.0.0.1", 0)).awaitUninterruptibly().channel();
+
+        for (int i = 0; i < 11; i++) {
+            ByteBuf ocr1 = createOCR1(serverAddress, PROTOCOL_VERSION, RakConstants.MAXIMUM_MTU_SIZE);
+            rawClient.writeAndFlush(new DatagramPacket(ocr1, serverAddress)).awaitUninterruptibly();
+
+            DatagramPacket response = responses.poll(1, TimeUnit.SECONDS);
+            Assertions.assertNotNull(response, "Server should continue answering repeated OCR1 attempts");
+            Assertions.assertEquals(ID_OPEN_CONNECTION_REPLY_1, response.content().getUnsignedByte(0));
+            response.release();
+        }
+
+        rawClient.close().awaitUninterruptibly();
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest2StillReceivesReplies() throws InterruptedException {
+        setupServer(RakServerCookieMode.OFFLOADED_PSK, SECRET);
+        assertRepeatedOpenConnectionRequest2StillReceivesReplies(true);
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest2InActiveModeReusesPendingChildChannel() throws InterruptedException {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+        assertRepeatedOpenConnectionRequest2StillReceivesReplies(true);
+
+        Channel firstAccepted = acceptedChannels.poll(1, TimeUnit.SECONDS);
+        Assertions.assertNotNull(firstAccepted, "The first OCR2 should create a child channel");
+        Assertions.assertNull(acceptedChannels.poll(300, TimeUnit.MILLISECONDS),
+                "Repeated OCR2 retries during handshake should not recreate the child channel in ACTIVE mode");
+    }
+
+    @Test
+    public void testCreateChildChannelDoesNotReusePendingChildAcrossDifferentLocalAddress() throws Exception {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+
+        RakServerChannel server = (RakServerChannel) this.serverChannel;
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        InetSocketAddress firstLocalAddress = new InetSocketAddress("127.0.0.1", PORT);
+        InetSocketAddress secondLocalAddress = new InetSocketAddress("127.0.0.2", PORT);
+
+        RakServerChannel.ChildChannelCreationResult first = createChildChannel(
+                server, remoteAddress, firstLocalAddress, 12345L, 1200, PROTOCOL_VERSION);
+        RakServerChannel.ChildChannelCreationResult second = createChildChannel(
+                server, remoteAddress, secondLocalAddress, 12345L, 1200, PROTOCOL_VERSION);
+
+        Assertions.assertNotNull(first.channel(), "The first OCR2 should create a pending child channel");
+        Assertions.assertNotNull(second.channel(), "A retry arriving on another local address should still succeed");
+        Assertions.assertNotSame(first.channel(), second.channel(),
+                "Retries received on a different local address must create a replacement child channel");
+        Assertions.assertEquals(secondLocalAddress, second.channel().localAddress(),
+                "The replacement child channel should keep the local address that received the retry");
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest2StillReceivesRepliesInStatelessMode() throws InterruptedException {
+        setupServer(RakServerCookieMode.STATELESS, SECRET);
+        assertRepeatedOpenConnectionRequest2StillReceivesReplies(true);
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest2StillReceivesRepliesInOffMode() throws InterruptedException {
+        setupServer(RakServerCookieMode.OFF, SECRET);
+        assertRepeatedOpenConnectionRequest2StillReceivesReplies(true);
+    }
+
+    @Test
+    public void testRepeatedOpenConnectionRequest2StillReceivesRepliesInNoneMode() throws InterruptedException {
+        setupServer(RakServerCookieMode.NONE, null);
+        assertRepeatedOpenConnectionRequest2StillReceivesReplies(false);
+    }
+
+    private void assertRepeatedOpenConnectionRequest2StillReceivesReplies(boolean hasCookie) throws InterruptedException {
+        InetSocketAddress serverAddress = new InetSocketAddress("127.0.0.1", PORT);
+        BlockingQueue<DatagramPacket> responses = new LinkedBlockingQueue<>();
+
+        Channel rawClient = new Bootstrap()
+                .group(group)
+                .channel(NioDatagramChannel.class)
+                .handler(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        if (msg instanceof DatagramPacket) {
+                            responses.add(((DatagramPacket) msg).retain());
+                        }
+                    }
+                })
+                .bind(new InetSocketAddress("127.0.0.1", 0)).awaitUninterruptibly().channel();
+
+        int cookie = 0;
+        if (hasCookie) {
+            SipHash sipHash = new SipHash(SECRET);
+            cookie = sipHash.generateStatelessCookie((InetSocketAddress) rawClient.localAddress(), PROTOCOL_VERSION);
+        }
+
+        for (int i = 0; i < 6; i++) {
+            ByteBuf ocr2 = createOCR2(rawClient.localAddress(), serverAddress, cookie, hasCookie);
+            rawClient.writeAndFlush(new DatagramPacket(ocr2, serverAddress)).awaitUninterruptibly();
+
+            DatagramPacket response = pollHandshakeResponse(responses);
+            Assertions.assertNotNull(response, "Server should continue answering repeated OCR2 attempts");
+            Assertions.assertEquals(ID_OPEN_CONNECTION_REPLY_2, response.content().getUnsignedByte(0));
+            response.release();
+        }
+
+        rawClient.close().awaitUninterruptibly();
+    }
+
+    private DatagramPacket pollHandshakeResponse(BlockingQueue<DatagramPacket> responses) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(1);
+        while (true) {
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) {
+                return null;
+            }
+
+            DatagramPacket response = responses.poll(remaining, TimeUnit.NANOSECONDS);
+            if (response == null) {
+                return null;
+            }
+
+            short packetId = response.content().getUnsignedByte(0);
+            if (packetId == ID_OPEN_CONNECTION_REPLY_2 || packetId == ID_ALREADY_CONNECTED) {
+                return response;
+            }
+
+            response.release();
+        }
+    }
+
+    private RakServerChannel.ChildChannelCreationResult createChildChannel(
+            RakServerChannel server,
+            InetSocketAddress remoteAddress,
+            InetSocketAddress localAddress,
+            long guid,
+            int mtu,
+            int protocolVersion) throws Exception {
+        return server.eventLoop()
+                .submit(() -> server.createChildChannel(remoteAddress, localAddress, guid, mtu, protocolVersion))
+                .get(1, TimeUnit.SECONDS);
     }
 
     /**
@@ -423,6 +583,16 @@ public class RakCookieTests {
         RakUtils.writeAddress(buf, serverAddr);
         buf.writeShort(RakConstants.MAXIMUM_MTU_SIZE);
         buf.writeLong(12345L); // Client GUID
+        return buf;
+    }
+
+    private ByteBuf createOCR1(InetSocketAddress serverAddr, int protocolVersion, int mtuSize) {
+        ByteBuf buf = Unpooled.buffer(mtuSize);
+        buf.writeByte(ID_OPEN_CONNECTION_REQUEST_1);
+        buf.writeBytes(RakConstants.DEFAULT_UNCONNECTED_MAGIC);
+        buf.writeByte(protocolVersion);
+        buf.writeZero(mtuSize - 1 - RakConstants.DEFAULT_UNCONNECTED_MAGIC.length - 1
+                - (serverAddr.getAddress() instanceof java.net.Inet6Address ? 40 : 20) - UDP_HEADER_SIZE);
         return buf;
     }
 }

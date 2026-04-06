@@ -54,10 +54,10 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
         if (childConsumer != null) {
             childConsumer.accept(this);
         }
-        // Create an internal pipeline for RakNet session logic to take place. We use the parent channel to ensure
-        // this all occurs on the parent event loop so the connection is not slowed down by any user code.
-        // (compression, encryption, etc.)
-        this.rakPipeline = new RakChannelPipeline(parent, this);
+        // Create an internal pipeline for RakNet session logic to take place.
+        // Unlike the user-facing pipeline, this runs on the child channel's event loop so session state, ticking
+        // and outbound packet scheduling are isolated from the parent datagram loop.
+        this.rakPipeline = new RakChannelPipeline(this);
         this.rakPipeline.addLast(RakChildDatagramHandler.NAME, new RakChildDatagramHandler(this));
 
         // Setup session/online phase
@@ -71,8 +71,6 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
         this.rakPipeline.addLast(DisconnectNotificationHandler.NAME, DisconnectNotificationHandler.INSTANCE);
         this.rakPipeline.addLast(RakServerOnlineInitialHandler.NAME, new RakServerOnlineInitialHandler(this));
         this.rakPipeline.addLast(RakUnhandledMessagesQueue.NAME, new RakUnhandledMessagesQueue(this));
-        this.rakPipeline.fireChannelRegistered();
-        this.rakPipeline.fireChannelActive();
     }
 
     @Override
@@ -121,6 +119,12 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     }
 
     @Override
+    protected void doRegister() throws Exception {
+        this.rakPipeline.fireChannelRegistered();
+        this.rakPipeline.fireChannelActive();
+    }
+
+    @Override
     protected void doWrite(ChannelOutboundBuffer in) throws Exception {
         if (!this.open) {
             throw new ClosedChannelException();
@@ -161,6 +165,7 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
 
     @Override
     protected void doClose() throws Exception {
+        ((RakServerChannel) this.parent()).onChildClosing(this);
         this.open = false;
     }
 

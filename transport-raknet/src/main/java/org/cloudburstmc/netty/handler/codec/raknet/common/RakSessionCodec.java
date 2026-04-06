@@ -193,11 +193,11 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
     @Override
     public void write(ChannelHandlerContext ctx, Object msg, ChannelPromise promise) {
-        if (!this.channel.parent().eventLoop().inEventLoop()) {
+        if (!this.channel.eventLoop().inEventLoop()) {
             // Make sure this runs on correct thread
             log.error("Tried to write packet from wrong thread: {}", Thread.currentThread().getName(), new Throwable());
             final Object finalMsg = msg;
-            this.channel.parent().eventLoop().execute(() -> this.write(ctx, finalMsg, promise));
+            this.channel.eventLoop().execute(() -> this.write(ctx, finalMsg, promise));
             return;
         }
         if (msg instanceof ByteBuf) {
@@ -776,10 +776,10 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
     public void disconnect(RakDisconnectReason reason) {
         // Ensure we disconnect on the right thread
-        if (this.channel.parent().eventLoop().inEventLoop()) {
+        if (this.channel.eventLoop().inEventLoop()) {
             this.disconnect0(reason);
         } else {
-            this.channel.parent().eventLoop().execute(() -> this.disconnect0(reason));
+            this.channel.eventLoop().execute(() -> this.disconnect0(reason));
         }
     }
 

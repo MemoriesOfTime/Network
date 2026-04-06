@@ -40,6 +40,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -83,17 +84,29 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
      * @param protocolVersion RakNet protocol version from the handshake cookie, or 0 if not available.
      * @return RakChildChannel instance of new channel, or {@code null} if a non-replaceable channel already exists.
      */
-    public RakChildChannel createChildChannel(InetSocketAddress address, InetSocketAddress localAddress, long clientGuid, int mtu, int protocolVersion) {
+    public ChildChannelCreationResult createChildChannel(InetSocketAddress address, InetSocketAddress localAddress, long clientGuid, int mtu, int protocolVersion) {
         RakChildChannel existingChannel = this.childChannelMap.get(address);
         RakServerCookieMode cookieMode = this.config().getCookieMode();
         boolean trustedIp = cookieMode != RakServerCookieMode.NONE
                 && cookieMode != RakServerCookieMode.STATELESS
                 && cookieMode != RakServerCookieMode.OFF;
+        if (existingChannel != null
+                && existingChannel.config().getGuid() == clientGuid
+                && existingChannel.config().getMtu() == mtu
+                && Objects.equals(existingChannel.localAddress(), localAddress)
+                && !existingChannel.isActive()) {
+            return ChildChannelCreationResult.existing(existingChannel);
+        }
         if (trustedIp && existingChannel != null) {
             existingChannel.close();
         } else if (existingChannel != null) {
             // Could be spoofed, so we don't close the existing channel.
-            return null;
+            return ChildChannelCreationResult.alreadyConnected();
+        }
+
+        int maxConnections = this.config().getMaxConnections();
+        if (existingChannel == null && maxConnections > 0 && this.childChannelMap.size() >= maxConnections) {
+            return ChildChannelCreationResult.noFreeIncomingConnections();
         }
 
         RakChildChannel channel = new RakChildChannel(address, localAddress, this, clientGuid, mtu, childConsumer);
@@ -110,11 +123,25 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         if (this.config().getMetrics() != null) {
             this.config().getMetrics().channelOpen(address);
         }
-        return channel;
+        return ChildChannelCreationResult.success(channel);
+    }
+
+    public boolean hasCapacityFor(InetSocketAddress address) {
+        if (this.childChannelMap.containsKey(address)) {
+            return true;
+        }
+        int maxConnections = this.config().getMaxConnections();
+        return maxConnections <= 0 || this.childChannelMap.size() < maxConnections;
     }
 
     public RakChildChannel getChildChannel(SocketAddress address) {
         return this.childChannelMap.get(address);
+    }
+
+    void onChildClosing(RakChildChannel channel) {
+        // Release the slot as soon as the child starts closing so new handshakes are not rejected while the
+        // closeFuture listener is still pending.
+        this.childChannelMap.remove(channel.remoteAddress(), channel);
     }
 
     private void onChildClosed(ChannelFuture channelFuture) {
@@ -125,12 +152,19 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
             this.config().getMetrics().channelClose(channel.remoteAddress());
         }
 
-        channel.rakPipeline().fireChannelInactive();
-        channel.rakPipeline().fireChannelUnregistered();
-        // Need to use reflection to destroy pipeline because
-        // DefaultChannelPipeline.destroy() is only called when channel.isOpen() is false,
-        // but the method is called on parent channel, and there is no other way to destroy pipeline.
-        RakUtils.destroyChannelPipeline(channel.rakPipeline());
+        Runnable destroyTask = () -> {
+            channel.rakPipeline().fireChannelInactive();
+            channel.rakPipeline().fireChannelUnregistered();
+            // Need to use reflection to destroy pipeline because
+            // DefaultChannelPipeline.destroy() is only called when channel.isOpen() is false,
+            // but the method is called on parent channel, and there is no other way to destroy pipeline.
+            RakUtils.destroyChannelPipeline(channel.rakPipeline());
+        };
+        if (channel.eventLoop().inEventLoop()) {
+            destroyTask.run();
+        } else {
+            channel.eventLoop().execute(destroyTask);
+        }
     }
 
     @Override
@@ -157,5 +191,46 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
     @Override
     public RakServerChannelConfig config() {
         return this.config;
+    }
+
+    public static final class ChildChannelCreationResult {
+        private final RakChildChannel channel;
+        private final ChildChannelCreationFailure failure;
+
+        private ChildChannelCreationResult(RakChildChannel channel, ChildChannelCreationFailure failure) {
+            this.channel = channel;
+            this.failure = failure;
+        }
+
+        public static ChildChannelCreationResult success(RakChildChannel channel) {
+            return new ChildChannelCreationResult(channel, ChildChannelCreationFailure.NONE);
+        }
+
+        public static ChildChannelCreationResult existing(RakChildChannel channel) {
+            return new ChildChannelCreationResult(channel, ChildChannelCreationFailure.EXISTING_CHANNEL);
+        }
+
+        public static ChildChannelCreationResult alreadyConnected() {
+            return new ChildChannelCreationResult(null, ChildChannelCreationFailure.ALREADY_CONNECTED);
+        }
+
+        public static ChildChannelCreationResult noFreeIncomingConnections() {
+            return new ChildChannelCreationResult(null, ChildChannelCreationFailure.NO_FREE_INCOMING_CONNECTIONS);
+        }
+
+        public RakChildChannel channel() {
+            return this.channel;
+        }
+
+        public ChildChannelCreationFailure failure() {
+            return this.failure;
+        }
+    }
+
+    public enum ChildChannelCreationFailure {
+        NONE,
+        EXISTING_CHANNEL,
+        ALREADY_CONNECTED,
+        NO_FREE_INCOMING_CONNECTIONS
     }
 }

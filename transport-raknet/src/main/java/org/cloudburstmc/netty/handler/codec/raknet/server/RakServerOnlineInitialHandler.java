@@ -18,6 +18,7 @@ package org.cloudburstmc.netty.handler.codec.raknet.server;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandler.Sharable;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.util.internal.logging.InternalLogger;
@@ -26,6 +27,7 @@ import org.cloudburstmc.netty.channel.raknet.RakChildChannel;
 import org.cloudburstmc.netty.channel.raknet.RakDisconnectReason;
 import org.cloudburstmc.netty.channel.raknet.RakPriority;
 import org.cloudburstmc.netty.channel.raknet.RakReliability;
+import org.cloudburstmc.netty.channel.raknet.RakServerChannel;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerChannelConfig;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerMetrics;
@@ -111,7 +113,8 @@ public class RakServerOnlineInitialHandler extends SimpleChannelInboundHandler<E
     }
 
     private void sendConnectionRequestFailed(ChannelHandlerContext ctx, long guid) {
-        ByteBuf magicBuf = ((RakServerChannelConfig) ctx.channel().config()).getUnconnectedMagic();
+        RakServerChannelConfig config = ((RakServerChannel) this.channel.parent()).config();
+        ByteBuf magicBuf = config.getUnconnectedMagic();
         int length = 9 + magicBuf.readableBytes();
 
         ByteBuf reply = ctx.alloc().ioBuffer(length);
@@ -119,11 +122,11 @@ public class RakServerOnlineInitialHandler extends SimpleChannelInboundHandler<E
         reply.writeBytes(magicBuf, magicBuf.readerIndex(), magicBuf.readableBytes());
         reply.writeLong(guid);
 
-        sendRaw(ctx, reply);
-        ctx.fireUserEventTriggered(RakDisconnectReason.CONNECTION_REQUEST_FAILED).close();
+        sendRaw(ctx, reply).addListener(future ->
+                ctx.fireUserEventTriggered(RakDisconnectReason.CONNECTION_REQUEST_FAILED).close());
     }
 
-    private void sendRaw(ChannelHandlerContext ctx, ByteBuf buf) {
-        ctx.pipeline().context(RakSessionCodec.NAME).writeAndFlush(buf);
+    private ChannelFuture sendRaw(ChannelHandlerContext ctx, ByteBuf buf) {
+        return ctx.pipeline().context(RakSessionCodec.NAME).writeAndFlush(buf);
     }
 }

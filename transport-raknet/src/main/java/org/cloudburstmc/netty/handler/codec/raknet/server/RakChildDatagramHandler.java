@@ -56,8 +56,10 @@ public class RakChildDatagramHandler extends ChannelOutboundHandlerAdapter {
 
         parent.write(datagram).addListener((ChannelFuture future) -> {
             if (!future.isSuccess() && !(future.cause() instanceof ClosedChannelException)) {
-                this.channel.pipeline().fireExceptionCaught(future.cause());
-                this.channel.close();
+                this.channel.eventLoop().execute(() -> {
+                    this.channel.pipeline().fireExceptionCaught(future.cause());
+                    this.channel.close();
+                });
             }
         });
     }
@@ -66,7 +68,7 @@ public class RakChildDatagramHandler extends ChannelOutboundHandlerAdapter {
     public void flush(ChannelHandlerContext ctx) throws Exception {
         if (this.canFlush) {
             this.canFlush = false;
-            ctx.flush();
+            this.channel.parent().parent().flush();
         }
     }
 }

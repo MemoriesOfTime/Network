@@ -16,7 +16,6 @@
 
 package org.cloudburstmc.netty.channel.raknet;
 
-import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.DefaultChannelPipeline;
 import io.netty.util.ReferenceCountUtil;
@@ -30,8 +29,8 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
 
     private final RakChildChannel child;
 
-    protected RakChannelPipeline(Channel parent, RakChildChannel child) {
-        super(parent);
+    protected RakChannelPipeline(RakChildChannel child) {
+        super(child);
         this.child = child;
     }
 

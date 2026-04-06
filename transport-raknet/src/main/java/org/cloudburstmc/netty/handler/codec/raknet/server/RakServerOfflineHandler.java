@@ -25,6 +25,8 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.cloudburstmc.netty.channel.raknet.RakChildChannel;
 import org.cloudburstmc.netty.channel.raknet.RakPing;
 import org.cloudburstmc.netty.channel.raknet.RakServerChannel;
+import org.cloudburstmc.netty.channel.raknet.RakServerChannel.ChildChannelCreationFailure;
+import org.cloudburstmc.netty.channel.raknet.RakServerChannel.ChildChannelCreationResult;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerChannelConfig;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerCookieMode;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerMetrics;
@@ -135,6 +137,7 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
 
     private void onOpenConnectionRequest1(ChannelHandlerContext ctx, DatagramPacket packet, ByteBuf magicBuf, long guid) {
         RakServerChannelConfig config = (RakServerChannelConfig) ctx.channel().config();
+        RakServerChannel serverChannel = (RakServerChannel) ctx.channel();
 
         ByteBuf buffer = packet.content();
         InetSocketAddress sender = packet.sender();
@@ -153,8 +156,10 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
             return;
         }
 
-        // TODO: banned address check?
-        // TODO: max connections check?
+        if (!serverChannel.hasCapacityFor(sender)) {
+            this.sendNoFreeIncomingConnections(ctx, packet, magicBuf, guid);
+            return;
+        }
 
         boolean sendCookie = config.getCookieMode() != RakServerCookieMode.OFFLOADED
                 && config.getCookieMode() != RakServerCookieMode.OFFLOADED_PSK
@@ -226,15 +231,23 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
         int protocolVersion = expectCookie ? SipHash.getProtocolVersion(cookie) : 0;
 
         RakServerChannel serverChannel = (RakServerChannel) ctx.channel();
-        RakChildChannel channel = serverChannel.createChildChannel(sender, packet.recipient(), clientGuid, mtu, protocolVersion);
+        ChildChannelCreationResult result = serverChannel.createChildChannel(sender, packet.recipient(), clientGuid, mtu, protocolVersion);
+        RakChildChannel channel = result.channel();
         if (channel == null) {
             if (log.isTraceEnabled()) {
-                log.trace("[{}] Received ID_OPEN_CONNECTION_REQUEST_2, but a channel already exists for this socket address",
-                        sender);
+                log.trace("[{}] Received ID_OPEN_CONNECTION_REQUEST_2, but the server rejected the child channel creation: {}",
+                        sender, result.failure());
             }
-            // Already connected
-            this.sendAlreadyConnected(ctx, packet, magicBuf, guid);
+            if (result.failure() == ChildChannelCreationFailure.NO_FREE_INCOMING_CONNECTIONS) {
+                this.sendNoFreeIncomingConnections(ctx, packet, magicBuf, guid);
+            } else {
+                this.sendAlreadyConnected(ctx, packet, magicBuf, guid);
+            }
             return;
+        }
+
+        if (result.failure() == ChildChannelCreationFailure.EXISTING_CHANNEL && log.isTraceEnabled()) {
+            log.trace("[{}] Re-sending ID_OPEN_CONNECTION_REPLY_2 for repeated ID_OPEN_CONNECTION_REQUEST_2", sender);
         }
 
         ByteBuf replyBuffer = ctx.alloc().ioBuffer(31);
@@ -242,7 +255,7 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
         replyBuffer.writeBytes(magicBuf, magicBuf.readerIndex(), magicBuf.readableBytes());
         replyBuffer.writeLong(guid);
         RakUtils.writeAddress(replyBuffer, packet.sender());
-        replyBuffer.writeShort(mtu);
+        replyBuffer.writeShort(channel.config().getMtu());
         replyBuffer.writeBoolean(false); // Security
         ctx.writeAndFlush(RakUtils.datagramReply(replyBuffer, packet));
     }
@@ -259,6 +272,14 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
     private void sendAlreadyConnected(ChannelHandlerContext ctx, DatagramPacket request, ByteBuf magicBuf, long guid) {
         ByteBuf buffer = ctx.alloc().ioBuffer(25, 25);
         buffer.writeByte(ID_ALREADY_CONNECTED);
+        buffer.writeBytes(magicBuf, magicBuf.readerIndex(), magicBuf.readableBytes());
+        buffer.writeLong(guid);
+        ctx.writeAndFlush(RakUtils.datagramReply(buffer, request));
+    }
+
+    private void sendNoFreeIncomingConnections(ChannelHandlerContext ctx, DatagramPacket request, ByteBuf magicBuf, long guid) {
+        ByteBuf buffer = ctx.alloc().ioBuffer(25, 25);
+        buffer.writeByte(ID_NO_FREE_INCOMING_CONNECTIONS);
         buffer.writeBytes(magicBuf, magicBuf.readerIndex(), magicBuf.readableBytes());
         buffer.writeLong(guid);
         ctx.writeAndFlush(RakUtils.datagramReply(buffer, request));
