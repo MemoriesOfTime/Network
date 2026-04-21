@@ -61,6 +61,9 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
                             .fireChannelReadComplete();
                 });
             }
+        } catch (Throwable throwable) {
+            log.error("Exception thrown while processing message in RakNet pipeline, closing channel {}", child.toString(), throwable);
+            this.child.close(this.child.newPromise().setFailure(throwable));
         } finally {
             ReferenceCountUtil.release(msg);
         }
