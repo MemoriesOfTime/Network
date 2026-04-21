@@ -76,6 +76,7 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
 
     @Override
     protected void onUnhandledInboundException(Throwable cause) {
-        log.error("Exception thrown in RakNet pipeline", cause);
+        log.error("Exception thrown in RakNet pipeline, closing channel {}", child.toString(), cause);
+        child.close(child.newPromise().setFailure(cause));
     }
 }
