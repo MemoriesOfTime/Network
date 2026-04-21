@@ -56,9 +56,14 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
                 this.child.pipeline().fireChannelRead(message).fireChannelReadComplete();
             } else {
                 this.child.eventLoop().execute(() -> {
-                    this.child.pipeline()
-                            .fireChannelRead(message)
-                            .fireChannelReadComplete();
+                    try {
+                        this.child.pipeline()
+                                .fireChannelRead(message)
+                                .fireChannelReadComplete();
+                    } catch (Throwable t) {
+                        log.error("Exception in child pipeline for {}, closing", child.remoteAddress(), t);
+                        child.close(child.newPromise().setFailure(t));
+                    }
                 });
             }
         } catch (Throwable throwable) {
