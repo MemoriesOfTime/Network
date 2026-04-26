@@ -527,6 +527,14 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         IntRange range;
         while ((range = queue.poll()) != null) {
+            if (range.end < range.start || range.end >= this.datagramWriteIndex) {
+                if (log.isDebugEnabled()) {
+                    log.debug("Received {} with out-of-range indices [{}, {}] from {} (write index: {})",
+                            nack ? "NACK" : "ACK", range.start, range.end, this.getRemoteAddress(), this.datagramWriteIndex);
+                }
+                continue;
+            }
+
             for (int i = range.start; i <= range.end; i++) {
                 RakDatagramPacket datagram = this.sentDatagrams.remove(i);
                 if (datagram != null) {

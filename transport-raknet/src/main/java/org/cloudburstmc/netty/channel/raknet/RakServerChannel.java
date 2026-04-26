@@ -62,6 +62,14 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         this.childConsumer = childConsumer;
         this.config = new DefaultRakServerConfig(this);
         this.initPipeline();
+
+        channel.closeFuture().addListener(future -> {
+            if (!future.isSuccess()) {
+                log.warn("RakServerChannel closed unsuccessfully", future.cause());
+            } else if (future.cause() != null) {
+                log.warn("RakServerChannel closed with cause", future.cause());
+            }
+        });
     }
 
     protected void initPipeline() {
