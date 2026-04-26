@@ -51,23 +51,32 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
         try {
             final Object message = msg instanceof EncapsulatedPacket ? ((EncapsulatedPacket) msg).toMessage() : msg;
             ReferenceCountUtil.retain(message);
-            if (this.child.eventLoop().inEventLoop()) {
-                this.child.pipeline().fireChannelRead(message).fireChannelReadComplete();
-            } else {
-                this.child.eventLoop().execute(() -> {
-                    try {
-                        this.child.pipeline()
-                                .fireChannelRead(message)
-                                .fireChannelReadComplete();
-                    } catch (Throwable t) {
-                        log.error("Exception in child pipeline for {}, closing", child.remoteAddress(), t);
-                        child.close(child.newPromise().setFailure(t));
-                    }
-                });
+            boolean submitted = false;
+            try {
+                if (this.child.eventLoop().inEventLoop()) {
+                    submitted = true;
+                    this.child.pipeline().fireChannelRead(message).fireChannelReadComplete();
+                } else {
+                    this.child.eventLoop().execute(() -> {
+                        try {
+                            this.child.pipeline()
+                                    .fireChannelRead(message)
+                                    .fireChannelReadComplete();
+                        } catch (Throwable t) {
+                            log.error("Exception in child pipeline for {}, closing", child.remoteAddress(), t);
+                            this.closeChild();
+                        }
+                    });
+                    submitted = true;
+                }
+            } finally {
+                if (!submitted) {
+                    ReferenceCountUtil.release(message);
+                }
             }
         } catch (Throwable throwable) {
             log.error("Exception thrown while processing message in RakNet pipeline, closing channel {}", child.toString(), throwable);
-            this.child.close(this.child.newPromise().setFailure(throwable));
+            this.closeChild();
         } finally {
             ReferenceCountUtil.release(msg);
         }
@@ -84,6 +93,18 @@ public class RakChannelPipeline extends DefaultChannelPipeline {
     @Override
     protected void onUnhandledInboundException(Throwable cause) {
         log.error("Exception thrown in RakNet pipeline, closing channel {}", child.toString(), cause);
-        child.close(child.newPromise().setFailure(cause));
+        this.closeChild();
+    }
+
+    private void closeChild() {
+        try {
+            this.child.close().addListener(future -> {
+                if (!future.isSuccess()) {
+                    log.warn("Failed to close child channel {}", this.child, future.cause());
+                }
+            });
+        } catch (Throwable t) {
+            log.warn("Failed to submit child channel close for {}", this.child, t);
+        }
     }
 }

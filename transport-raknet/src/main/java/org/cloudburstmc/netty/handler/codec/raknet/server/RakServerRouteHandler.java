@@ -20,6 +20,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.socket.DatagramPacket;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.cloudburstmc.netty.channel.raknet.RakChildChannel;
 import org.cloudburstmc.netty.channel.raknet.RakServerChannel;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelMetrics;
@@ -27,6 +29,7 @@ import org.cloudburstmc.netty.channel.raknet.config.RakChannelMetrics;
 public class RakServerRouteHandler extends ChannelDuplexHandler {
 
     public static final String NAME = "rak-server-route-handler";
+    private static final InternalLogger log = InternalLoggerFactory.getInstance(RakServerRouteHandler.class);
     private final RakServerChannel parent;
 
     public RakServerRouteHandler(RakServerChannel parent) {
@@ -60,10 +63,29 @@ public class RakServerRouteHandler extends ChannelDuplexHandler {
             if (channel.eventLoop().inEventLoop()) {
                 channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete();
             } else {
-                channel.eventLoop().execute(() -> channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete());
+                try {
+                    channel.eventLoop().execute(() -> channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete());
+                } catch (Throwable t) {
+                    buffer.release();
+                    log.warn("Failed to route packet to child event loop for {}, closing child channel",
+                            channel.remoteAddress(), t);
+                    closeChild(channel);
+                }
             }
         } finally {
             packet.release();
+        }
+    }
+
+    private static void closeChild(RakChildChannel channel) {
+        try {
+            channel.close().addListener(future -> {
+                if (!future.isSuccess()) {
+                    log.warn("Failed to close child channel {}", channel, future.cause());
+                }
+            });
+        } catch (Throwable t) {
+            log.warn("Failed to submit child channel close for {}", channel, t);
         }
     }
 }

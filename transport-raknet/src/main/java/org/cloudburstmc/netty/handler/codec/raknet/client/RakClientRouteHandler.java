@@ -44,17 +44,25 @@ public class RakClientRouteHandler extends ChannelDuplexHandler {
             throw new IllegalStateException("Channel is already bound!");
         }
 
+        ChannelPromise connectPromise = this.channel.getConnectPromise();
         ChannelFuture parentFuture = this.channel.parent().connect(remoteAddress, localAddress);
         parentFuture.addListener(future -> {
-            if (future.isSuccess()) {
+            if (!future.isSuccess()) {
+                connectPromise.tryFailure(future.cause());
+                return;
+            }
+
+            try {
                 this.channel.rakPipeline().addAfter(UnconnectedPongDecoder.NAME,
-                        RakClientOfflineHandler.NAME, new RakClientOfflineHandler(channel, this.channel.getConnectPromise()));
+                        RakClientOfflineHandler.NAME, new RakClientOfflineHandler(channel, connectPromise));
+            } catch (Throwable t) {
+                connectPromise.tryFailure(t);
             }
         });
 
         PromiseCombiner combiner = new PromiseCombiner(this.channel.eventLoop());
         combiner.add(parentFuture);
-        combiner.add((ChannelFuture) this.channel.getConnectPromise());
+        combiner.add((ChannelFuture) connectPromise);
         combiner.finish(promise);
     }
 

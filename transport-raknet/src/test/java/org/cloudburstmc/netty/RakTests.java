@@ -22,8 +22,10 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
+import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.util.ReferenceCountUtil;
 import org.cloudburstmc.netty.channel.raknet.*;
@@ -43,6 +45,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
+import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -133,6 +136,31 @@ public class RakTests {
     private <T extends Channel> T track(T channel) {
         this.openChannels.add(channel);
         return channel;
+    }
+
+    private RakChildChannel newChildChannel(RakServerChannel server, InetSocketAddress remoteAddress, InetSocketAddress localAddress) throws Exception {
+        Constructor<RakChildChannel> constructor = RakChildChannel.class.getDeclaredConstructor(
+                InetSocketAddress.class, InetSocketAddress.class, RakServerChannel.class, long.class, int.class, Consumer.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(
+                remoteAddress,
+                localAddress,
+                server,
+                12345L,
+                RakConstants.MAXIMUM_MTU_SIZE,
+                null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<SocketAddress, RakChildChannel> childChannelMap(RakServerChannel server) throws Exception {
+        Field childChannelMapField = RakServerChannel.class.getDeclaredField("childChannelMap");
+        childChannelMapField.setAccessible(true);
+        return (Map<SocketAddress, RakChildChannel>) childChannelMapField.get(server);
+    }
+
+    private RakChildChannel registerChildChannel(RakChildChannel child) {
+        this.serverChildGroup.register(child).syncUninterruptibly();
+        return this.track(child);
     }
 
     private ServerBootstrap serverBootstrap() {
@@ -266,23 +294,47 @@ public class RakTests {
     }
 
     @Test
+    public void testClientConnectFailsWhenParentConnectFails() {
+        Channel occupied = this.track(new Bootstrap()
+                .group(this.clientGroup)
+                .channel(NioDatagramChannel.class)
+                .handler(new ChannelInboundHandlerAdapter())
+                .bind(new InetSocketAddress("127.0.0.1", 0))
+                .syncUninterruptibly()
+                .channel());
+        InetSocketAddress occupiedAddress = (InetSocketAddress) occupied.localAddress();
+
+        ChannelFuture connectFuture = clientBootstrap(RakConstants.MAXIMUM_MTU_SIZE)
+                .handler(new ChannelInitializer<RakClientChannel>() {
+                    @Override
+                    protected void initChannel(RakClientChannel ch) {
+                    }
+                })
+                .connect(new InetSocketAddress("127.0.0.1", 19132), occupiedAddress);
+        RakClientChannel client = (RakClientChannel) this.track(connectFuture.channel());
+
+        Assertions.assertTrue(connectFuture.awaitUninterruptibly(2, TimeUnit.SECONDS),
+                "Client connect future should fail promptly when the parent UDP connect fails");
+        Assertions.assertFalse(connectFuture.isSuccess(), "Client connect future should surface the parent failure");
+        Assertions.assertTrue(client.getConnectPromise().isDone(),
+                "RakNet connect promise should also be completed when the parent connect fails");
+        Assertions.assertFalse(client.getConnectPromise().isSuccess(),
+                "RakNet connect promise should fail when the parent connect fails");
+        Assertions.assertNotNull(client.getConnectPromise().cause(),
+                "RakNet connect promise should retain the parent failure cause");
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     public void testClosingChildChannelImmediatelyReleasesCapacity() throws Exception {
         RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
         server.config().setOption(RakChannelOption.RAK_MAX_CONNECTIONS, 1);
 
-        Constructor<RakChildChannel> constructor = RakChildChannel.class.getDeclaredConstructor(
-                InetSocketAddress.class, InetSocketAddress.class, RakServerChannel.class, long.class, int.class, Consumer.class);
-        constructor.setAccessible(true);
-
         InetSocketAddress firstAddress = new InetSocketAddress("127.0.0.1", 19132);
-        RakChildChannel child = constructor.newInstance(
-                firstAddress,
-                new InetSocketAddress("127.0.0.1", 19132),
+        RakChildChannel child = newChildChannel(
                 server,
-                12345L,
-                RakConstants.MAXIMUM_MTU_SIZE,
-                null);
+                firstAddress,
+                new InetSocketAddress("127.0.0.1", 19132));
 
         Field childChannelMapField = RakServerChannel.class.getDeclaredField("childChannelMap");
         childChannelMapField.setAccessible(true);
@@ -303,20 +355,144 @@ public class RakTests {
     }
 
     @Test
+    public void testChildClosedDuringInitializationDoesNotRemainInMap() throws Exception {
+        RakServerChannel server = (RakServerChannel) this.track(new ServerBootstrap()
+                .channelFactory(RakChannelFactory.server(NioDatagramChannel.class))
+                .group(this.serverParentGroup, this.serverParentGroup)
+                .option(RakChannelOption.RAK_MAX_CONNECTIONS, 1)
+                .childHandler(new ChannelInitializer<RakChildChannel>() {
+                    @Override
+                    protected void initChannel(RakChildChannel ch) {
+                        ch.close();
+                    }
+                })
+                .bind(new InetSocketAddress("127.0.0.1", 0))
+                .syncUninterruptibly()
+                .channel());
+
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        InetSocketAddress localAddress = server.localAddress();
+        RakServerChannel.ChildChannelCreationResult result = server.eventLoop()
+                .submit(() -> server.createChildChannel(
+                        remoteAddress, localAddress, 12345L, RakConstants.MAXIMUM_MTU_SIZE, 11))
+                .get(1, TimeUnit.SECONDS);
+
+        if (result.channel() != null) {
+            result.channel().closeFuture().awaitUninterruptibly(1, TimeUnit.SECONDS);
+        }
+        Assertions.assertNull(server.getChildChannel(remoteAddress),
+                "Child closed during initialization should not remain in the server route map");
+        Assertions.assertTrue(server.hasCapacityFor(new InetSocketAddress("127.0.0.1", 30001)),
+                "Closed initialization child should not consume max-connection capacity");
+    }
+
+    @Test
+    public void testServerRouteReleasesBufferWhenChildEventLoopRejects() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        InetSocketAddress localAddress = new InetSocketAddress("127.0.0.1", 19132);
+        RakChildChannel child = newChildChannel(server, remoteAddress, localAddress);
+        EventLoopGroup rejectingGroup = new DefaultEventLoopGroup(1);
+        ByteBuf payload = Unpooled.buffer(1).writeByte(1);
+        EmbeddedChannel routeChannel = new EmbeddedChannel(new org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRouteHandler(server));
+
+        try {
+            rejectingGroup.register(child).syncUninterruptibly();
+            rejectingGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+            childChannelMap(server).put(remoteAddress, child);
+
+            Assertions.assertDoesNotThrow(
+                    () -> routeChannel.writeInbound(new DatagramPacket(payload, localAddress, remoteAddress)),
+                    "Rejected child event loop execution should be handled by the route handler");
+            Assertions.assertEquals(0, payload.refCnt(),
+                    "Route handler should release the retained payload if execute rejects it");
+        } finally {
+            childChannelMap(server).remove(remoteAddress, child);
+            if (payload.refCnt() > 0) {
+                payload.release(payload.refCnt());
+            }
+            routeChannel.finishAndReleaseAll();
+            rejectingGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        }
+    }
+
+    @Test
+    public void testRakPipelineReleasesMessageWhenChildEventLoopRejects() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 30000),
+                new InetSocketAddress("127.0.0.1", 19132));
+        EventLoopGroup rejectingGroup = new DefaultEventLoopGroup(1);
+        ByteBuf message = Unpooled.buffer(1).writeByte(1);
+        Method onUnhandledInboundMessage = child.rakPipeline().getClass()
+                .getDeclaredMethod("onUnhandledInboundMessage", ChannelHandlerContext.class, Object.class);
+        onUnhandledInboundMessage.setAccessible(true);
+
+        try {
+            rejectingGroup.register(child).syncUninterruptibly();
+            rejectingGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+
+            Assertions.assertDoesNotThrow(
+                    () -> onUnhandledInboundMessage.invoke(child.rakPipeline(), null, message),
+                    "Rejected child event loop execution should be handled by the RakNet pipeline");
+            Assertions.assertEquals(0, message.refCnt(),
+                    "RakNet pipeline should release the retained message if execute rejects it");
+        } finally {
+            if (message.refCnt() > 0) {
+                message.release(message.refCnt());
+            }
+            rejectingGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        }
+    }
+
+    @Test
+    public void testUnhandledRakPipelineExceptionClosesChildChannel() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = registerChildChannel(newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132)));
+
+        Assertions.assertDoesNotThrow(
+                () -> child.rakPipeline().fireExceptionCaught(new IllegalStateException("boom")),
+                "Unhandled RakNet pipeline exceptions should not throw while closing the child channel");
+        Assertions.assertTrue(child.closeFuture().awaitUninterruptibly(5, TimeUnit.SECONDS),
+                "Unhandled RakNet pipeline exceptions should close the child channel");
+        Assertions.assertFalse(child.isOpen(), "Child channel should be closed after an unhandled RakNet pipeline exception");
+    }
+
+    @Test
+    public void testChildPipelineExceptionClosesChildChannel() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = registerChildChannel(newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132)));
+        child.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) throws Exception {
+                throw new IllegalStateException("boom");
+            }
+        });
+
+        Assertions.assertDoesNotThrow(
+                () -> child.rakPipeline().fireChannelRead("message"),
+                "Child pipeline exceptions should not escape the RakNet pipeline");
+        Assertions.assertTrue(child.closeFuture().awaitUninterruptibly(5, TimeUnit.SECONDS),
+                "Child pipeline exceptions should close the child channel");
+        Assertions.assertFalse(child.isOpen(), "Child channel should be closed after a child pipeline exception");
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     public void testInvalidConnectionRequestDoesNotDependOnContextChannelType() throws Exception {
         RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
-        Constructor<RakChildChannel> constructor = RakChildChannel.class.getDeclaredConstructor(
-                InetSocketAddress.class, InetSocketAddress.class, RakServerChannel.class, long.class, int.class, Consumer.class);
-        constructor.setAccessible(true);
 
-        RakChildChannel child = constructor.newInstance(
-                new InetSocketAddress("127.0.0.1", 19132),
-                new InetSocketAddress("127.0.0.1", 19132),
+        RakChildChannel child = newChildChannel(
                 server,
-                12345L,
-                RakConstants.MAXIMUM_MTU_SIZE,
-                null);
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132));
 
         List<ByteBuf> outboundMessages = new ArrayList<>();
         EmbeddedChannel channel = new EmbeddedChannel();

@@ -62,14 +62,6 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         this.childConsumer = childConsumer;
         this.config = new DefaultRakServerConfig(this);
         this.initPipeline();
-
-        channel.closeFuture().addListener(future -> {
-            if (!future.isSuccess()) {
-                log.warn("RakServerChannel closed unsuccessfully", future.cause());
-            } else if (future.cause() != null) {
-                log.warn("RakServerChannel closed with cause", future.cause());
-            }
-        });
     }
 
     protected void initPipeline() {
@@ -125,8 +117,22 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         }
         // Fire channel thought ServerBootstrap,
         // register to eventLoop, assign default options and attributes
-        this.pipeline().fireChannelRead(channel).fireChannelReadComplete();
         this.childChannelMap.put(address, channel);
+        try {
+            this.pipeline().fireChannelRead(channel).fireChannelReadComplete();
+        } catch (Throwable t) {
+            this.childChannelMap.remove(address, channel);
+            try {
+                channel.close();
+            } catch (Throwable closeCause) {
+                log.warn("Failed to close rejected child channel {}", channel, closeCause);
+            }
+            throw t;
+        }
+        if (!channel.isOpen()) {
+            this.childChannelMap.remove(address, channel);
+            return ChildChannelCreationResult.alreadyConnected();
+        }
 
         if (this.config().getMetrics() != null) {
             this.config().getMetrics().channelOpen(address);
@@ -180,6 +186,12 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         if (log.isTraceEnabled()) {
             log.trace("Closing RakServerChannel: {}", Thread.currentThread().getName(), new Throwable());
         }
+        promise.addListener(future -> {
+            if (!future.isSuccess()) {
+                log.warn("Failed to close RakServerChannel", future.cause());
+            }
+        });
+
         PromiseCombiner combiner = new PromiseCombiner(this.eventLoop());
         this.childChannelMap.values().forEach(channel -> combiner.add(channel.close()));
 
