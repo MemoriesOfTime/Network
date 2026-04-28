@@ -14,13 +14,18 @@
  * under the License.
  */
 
+val networkVersion = System.getenv("NETWORK_PUBLISH_VERSION")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: rootProject.property("version") as String
+
 subprojects {
     apply(plugin = "java-library")
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
 
     group = "org.cloudburstmc.netty"
-    version = rootProject.property("version") as String
+    version = networkVersion
 
     repositories {
         mavenLocal()
