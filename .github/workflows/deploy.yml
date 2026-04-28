@@ -6,7 +6,7 @@ on:
         required: true
         type: string
       publish-version:
-        description: 'Optional Maven project version override'
+        description: 'Optional Maven project version override. Use a -SNAPSHOT value to keep Maven timestamped snapshot publishing.'
         required: false
         default: ''
         type: string

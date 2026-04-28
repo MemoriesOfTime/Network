@@ -26,7 +26,13 @@ jobs:
           feature_name="${GITHUB_REF_NAME#feature-snapshot/}"
           feature_name="${feature_name//\//-}"
           feature_name="${feature_name//[^A-Za-z0-9._-]/-}"
+          # Keep this as a Maven snapshot. The snapshot repository will publish
+          # timestamped concrete artifacts, matching the normal develop flow.
           publish_version="${base_version}-${feature_name}-SNAPSHOT"
+          if [[ "${publish_version}" != *-SNAPSHOT ]]; then
+            echo "::error::Feature publishes must use Maven snapshot versions"
+            exit 1
+          fi
 
           echo "publish-version=${publish_version}" >> "$GITHUB_OUTPUT"
           echo "Publishing ${publish_version}"
