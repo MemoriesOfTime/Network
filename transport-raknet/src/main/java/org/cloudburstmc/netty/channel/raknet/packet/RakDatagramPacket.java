@@ -17,7 +17,7 @@
 package org.cloudburstmc.netty.channel.raknet.packet;
 
 import io.netty.util.AbstractReferenceCounted;
-import io.netty.util.internal.ObjectPool;
+import io.netty.util.Recycler;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -26,9 +26,14 @@ import static org.cloudburstmc.netty.channel.raknet.RakConstants.*;
 
 public class RakDatagramPacket extends AbstractReferenceCounted {
 
-    private static final ObjectPool<RakDatagramPacket> RECYCLER = ObjectPool.newPool(RakDatagramPacket::new);
+    private static final Recycler<RakDatagramPacket> RECYCLER = new Recycler<>() {
+        @Override
+        protected RakDatagramPacket newObject(Handle<RakDatagramPacket> handle) {
+            return new RakDatagramPacket(handle);
+        }
+    };
 
-    private final ObjectPool.Handle<RakDatagramPacket> handle;
+    private final Recycler.Handle<RakDatagramPacket> handle;
     private final List<EncapsulatedPacket> packets = new ArrayList<>();
     private byte flags = FLAG_VALID | FLAG_NEEDS_B_AND_AS;
     private long sendTime;
@@ -39,7 +44,7 @@ public class RakDatagramPacket extends AbstractReferenceCounted {
         return RECYCLER.get();
     }
 
-    private RakDatagramPacket(ObjectPool.Handle<RakDatagramPacket> handle) {
+    private RakDatagramPacket(Recycler.Handle<RakDatagramPacket> handle) {
         this.handle = handle;
     }
 

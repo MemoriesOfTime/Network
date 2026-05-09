@@ -22,7 +22,6 @@ import io.netty.util.Attribute;
 import io.netty.util.AttributeKey;
 import org.cloudburstmc.netty.handler.codec.raknet.ProxyInboundRouter;
 import org.cloudburstmc.netty.handler.codec.raknet.ProxyOutboundRouter;
-import org.cloudburstmc.netty.util.RakUtils;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -61,7 +60,7 @@ public abstract class ProxyChannel<T extends Channel> implements Channel {
     }
 
     protected DefaultChannelPipeline newChannelPipeline() {
-        return RakUtils.newChannelPipeline(this);
+        return new ProxyChannelPipeline(this);
     }
 
     protected final ChannelPipeline internalPipeline() {
@@ -283,5 +282,11 @@ public abstract class ProxyChannel<T extends Channel> implements Channel {
     @Override
     public int compareTo(Channel o) {
         return this.channel.compareTo(o);
+    }
+
+    private static final class ProxyChannelPipeline extends DefaultChannelPipeline {
+        private ProxyChannelPipeline(Channel channel) {
+            super(channel);
+        }
     }
 }

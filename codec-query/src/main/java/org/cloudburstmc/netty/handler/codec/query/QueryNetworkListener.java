@@ -1,14 +1,10 @@
 package org.cloudburstmc.netty.handler.codec.query;
 
 import com.nukkitx.network.NetworkListener;
-import com.nukkitx.network.util.Bootstraps;
-import com.nukkitx.network.util.EventLoops;
-import com.nukkitx.network.util.Preconditions;
 import io.netty.bootstrap.Bootstrap;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
-import io.netty.channel.ChannelOption;
+import io.netty.channel.EventLoopGroup;
 import io.netty.channel.socket.DatagramChannel;
 import org.cloudburstmc.netty.handler.codec.query.codec.QueryPacketCodec;
 import org.cloudburstmc.netty.handler.codec.query.handler.QueryPacketHandler;
@@ -19,21 +15,25 @@ public class QueryNetworkListener extends ChannelInitializer<DatagramChannel> im
     private final InetSocketAddress address;
     private final QueryEventListener eventListener;
     private final Bootstrap bootstrap;
+    private final EventLoopGroup group;
     private DatagramChannel channel;
 
     public QueryNetworkListener(InetSocketAddress address, QueryEventListener eventListener) {
         this.address = address;
         this.eventListener = eventListener;
 
-        bootstrap = new Bootstrap().option(ChannelOption.ALLOCATOR, ByteBufAllocator.DEFAULT).handler(this);
-
-        Bootstraps.setupBootstrap(bootstrap, true);
-        this.bootstrap.group(EventLoops.commonGroup());
+        this.group = NettyTransport.newEventLoopGroup("query-listener");
+        this.bootstrap = new Bootstrap()
+                .group(this.group)
+                .channel(NettyTransport.datagramChannelClass())
+                .handler(this);
     }
 
     @Override
     public boolean bind() {
-        Preconditions.checkState(channel == null, "Channel already initialized");
+        if (channel != null) {
+            throw new IllegalStateException("Channel already initialized");
+        }
 
         ChannelFuture future = bootstrap.bind(address).awaitUninterruptibly();
 
@@ -42,8 +42,12 @@ public class QueryNetworkListener extends ChannelInitializer<DatagramChannel> im
 
     @Override
     public void close() {
-        if (channel != null) {
-            channel.close().syncUninterruptibly();
+        try {
+            if (channel != null) {
+                channel.close().syncUninterruptibly();
+            }
+        } finally {
+            group.shutdownGracefully().syncUninterruptibly();
         }
     }
 

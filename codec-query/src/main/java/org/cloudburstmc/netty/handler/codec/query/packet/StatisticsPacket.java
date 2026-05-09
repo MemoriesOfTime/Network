@@ -24,7 +24,7 @@ public class StatisticsPacket implements QueryPacket {
     @Override
     public void encode(ByteBuf buffer) {
         buffer.writeInt(sessionId);
-        buffer.writeBytes(payload);
+        buffer.writeBytes(payload, payload.readerIndex(), payload.readableBytes());
     }
 
     @Override

@@ -169,9 +169,6 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         Runnable destroyTask = () -> {
             channel.rakPipeline().fireChannelInactive();
             channel.rakPipeline().fireChannelUnregistered();
-            // Need to use reflection to destroy pipeline because
-            // DefaultChannelPipeline.destroy() is only called when channel.isOpen() is false,
-            // but the method is called on parent channel, and there is no other way to destroy pipeline.
             RakUtils.destroyChannelPipeline(channel.rakPipeline());
         };
         if (channel.eventLoop().inEventLoop()) {
