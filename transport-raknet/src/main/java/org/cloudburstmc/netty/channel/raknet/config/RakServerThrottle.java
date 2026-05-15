@@ -1,5 +1,5 @@
 /*
- * Copyright 2023 CloudburstMC
+ * Copyright 2026 CloudburstMC
  *
  * CloudburstMC licenses this file to you under the Apache License,
  * version 2.0 (the "License"); you may not use this file except in compliance
@@ -14,10 +14,12 @@
  * under the License.
  */
 
-rootProject.name = "network"
+package org.cloudburstmc.netty.channel.raknet.config;
 
-plugins {
-    id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
+import java.net.InetSocketAddress;
+
+public interface RakServerThrottle {
+    boolean accept(InetSocketAddress address);
+
+    void closed(InetSocketAddress address);
 }
-
-include("transport-raknet")

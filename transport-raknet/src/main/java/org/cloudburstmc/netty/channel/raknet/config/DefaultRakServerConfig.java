@@ -55,6 +55,8 @@ public class DefaultRakServerConfig extends DefaultChannelConfig implements RakS
     private volatile RakServerCookieMode cookieMode = RakServerCookieMode.ACTIVE;
     private volatile byte[] cookieSecret = new byte[32];
     private volatile SipHash sipHash;
+    private volatile boolean proxyProtocol;
+    private volatile RakServerThrottle throttle;
 
     public DefaultRakServerConfig(RakServerChannel channel) {
         super(channel);
@@ -76,7 +78,7 @@ public class DefaultRakServerConfig extends DefaultChannelConfig implements RakS
                 super.getOptions(),
                 RakChannelOption.RAK_GUID, RakChannelOption.RAK_MAX_CHANNELS, RakChannelOption.RAK_MAX_CONNECTIONS, RakChannelOption.RAK_SUPPORTED_PROTOCOLS, RakChannelOption.RAK_UNCONNECTED_MAGIC,
                 RakChannelOption.RAK_ADVERTISEMENT, RakChannelOption.RAK_HANDLE_PING, RakChannelOption.RAK_PACKET_LIMIT, RakChannelOption.RAK_GLOBAL_PACKET_LIMIT, RakChannelOption.RAK_SERVER_METRICS, 
-                RakChannelOption.RAK_IP_DONT_FRAGMENT, RakChannelOption.RAK_SERVER_COOKIE_MODE, RakChannelOption.RAK_SERVER_COOKIE_SECRET);
+                RakChannelOption.RAK_IP_DONT_FRAGMENT, RakChannelOption.RAK_SERVER_COOKIE_MODE, RakChannelOption.RAK_SERVER_COOKIE_SECRET, RakChannelOption.RAK_PROXY_PROTOCOL, RakChannelOption.RAK_THROTTLE);
     }
 
     @SuppressWarnings("unchecked")
@@ -127,6 +129,12 @@ public class DefaultRakServerConfig extends DefaultChannelConfig implements RakS
         if (option == RakChannelOption.RAK_SERVER_COOKIE_SECRET) {
             return (T) this.getCookieSecret();
         }
+        if (option == RakChannelOption.RAK_PROXY_PROTOCOL) {
+            return (T) Boolean.valueOf(this.getProxyProtocol());
+        }
+        if (option == RakChannelOption.RAK_THROTTLE) {
+            return (T) this.getThrottle();
+        }
         return this.channel.parent().config().getOption(option);
     }
 
@@ -165,6 +173,10 @@ public class DefaultRakServerConfig extends DefaultChannelConfig implements RakS
             this.setCookieMode((RakServerCookieMode) value);
         } else if (option == RakChannelOption.RAK_SERVER_COOKIE_SECRET) {
             this.setCookieSecret((byte[]) value);
+        } else if (option == RakChannelOption.RAK_PROXY_PROTOCOL) {
+            this.setProxyProtocol((Boolean) value);
+        } else if (option == RakChannelOption.RAK_THROTTLE) {
+            this.setThrottle((RakServerThrottle) value);
         } else {
             return this.channel.parent().config().setOption(option, value);
         }
@@ -347,5 +359,27 @@ public class DefaultRakServerConfig extends DefaultChannelConfig implements RakS
     @Override
     public SipHash getSipHash() {
         return this.sipHash;
+    }
+
+    @Override
+    public boolean getProxyProtocol() {
+        return this.proxyProtocol;
+    }
+
+    @Override
+    public RakServerChannelConfig setProxyProtocol(boolean proxyProtocol) {
+        this.proxyProtocol = proxyProtocol;
+        return this;
+    }
+
+    @Override
+    public RakServerThrottle getThrottle() {
+        return this.throttle;
+    }
+
+    @Override
+    public RakServerChannelConfig setThrottle(RakServerThrottle throttle) {
+        this.throttle = throttle;
+        return this;
     }
 }
