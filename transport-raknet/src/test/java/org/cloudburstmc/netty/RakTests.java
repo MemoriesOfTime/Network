@@ -140,11 +140,12 @@ public class RakTests {
 
     private RakChildChannel newChildChannel(RakServerChannel server, InetSocketAddress remoteAddress, InetSocketAddress localAddress) throws Exception {
         Constructor<RakChildChannel> constructor = RakChildChannel.class.getDeclaredConstructor(
-                InetSocketAddress.class, InetSocketAddress.class, RakServerChannel.class, long.class, int.class, Consumer.class);
+                InetSocketAddress.class, InetSocketAddress.class, InetSocketAddress.class, RakServerChannel.class, long.class, int.class, Consumer.class);
         constructor.setAccessible(true);
         return constructor.newInstance(
                 remoteAddress,
                 localAddress,
+                remoteAddress,
                 server,
                 12345L,
                 RakConstants.MAXIMUM_MTU_SIZE,

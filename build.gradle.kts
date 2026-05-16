@@ -14,13 +14,18 @@
  * under the License.
  */
 
+val networkVersion = System.getenv("NETWORK_PUBLISH_VERSION")
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: rootProject.property("version") as String
+
 subprojects {
     apply(plugin = "java-library")
     apply(plugin = "maven-publish")
     apply(plugin = "signing")
 
     group = "dev.mot.netty"
-    version = rootProject.property("version") as String
+    version = networkVersion
     val isSnapshotVersion = version.toString().endsWith("SNAPSHOT")
     val publishRepositoryName = if (isSnapshotVersion) "mot-repo-snapshot" else "mot-repo-release"
     val publishRepositoryUrl = if (isSnapshotVersion) {

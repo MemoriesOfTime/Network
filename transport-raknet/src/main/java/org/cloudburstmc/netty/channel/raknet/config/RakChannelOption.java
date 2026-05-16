@@ -195,11 +195,23 @@ public class RakChannelOption<T> extends ChannelOption<T> {
     public static final ChannelOption<RakServerCookieMode> RAK_SERVER_COOKIE_MODE =
             valueOf(RakChannelOption.class, "RAK_SERVER_COOKIE_MODE");
 
-    /*
+    /**
      * The secret key used for generating stateless cookies. Must be exactly 16 bytes. One will be generated if not set.
      */
     public static final ChannelOption<byte[]> RAK_SERVER_COOKIE_SECRET =
             valueOf(RakChannelOption.class, "RAK_SERVER_COOKIE_SECRET");
+
+    /**
+     * Use proxy protocol to determine the client's ip.
+     */
+    public static final ChannelOption<Boolean> RAK_PROXY_PROTOCOL =
+            valueOf(RakChannelOption.class, "RAK_PROXY_PROTOCOL");
+
+    /**
+     * Called to determine if a connection should be accepted.
+     */
+    public static final ChannelOption<RakServerThrottle> RAK_THROTTLE =
+            valueOf(RakChannelOption.class, "RAK_THROTTLE");
 
     @SuppressWarnings("deprecation")
     protected RakChannelOption() {

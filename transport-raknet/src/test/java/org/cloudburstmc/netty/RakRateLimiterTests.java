@@ -69,7 +69,7 @@ public class RakRateLimiterTests {
     }
 
     @Test
-    public void testRateLimitBlocksAllSocketsSharingTheSameAddress() throws Exception {
+    public void testRateLimitDoesNotBlockOtherSocketsSharingTheSameAddress() throws Exception {
         InetSocketAddress serverAddress = new InetSocketAddress("127.0.0.1", PORT);
         this.track(new ServerBootstrap()
                 .channelFactory(RakChannelFactory.server(NioDatagramChannel.class))
@@ -110,8 +110,10 @@ public class RakRateLimiterTests {
                 "The abusive socket should be temporarily blocked after exceeding the packet limit");
 
         second.writeAndFlush(new DatagramPacket(this.createUnconnectedPing(4L), serverAddress)).awaitUninterruptibly();
-        Assertions.assertNull(secondResponses.poll(300, TimeUnit.MILLISECONDS),
-                "Another socket sharing the same IP should also be blocked once the address exceeds the packet limit");
+        DatagramPacket secondReply = secondResponses.poll(1, TimeUnit.SECONDS);
+        Assertions.assertNotNull(secondReply,
+                "Rate limiter keys on (ip, port) so another socket sharing only the IP must not be blocked");
+        secondReply.release();
     }
 
     private Channel createRawClient(BlockingQueue<DatagramPacket> responses) {
