@@ -56,11 +56,13 @@ public class RakCookieTests {
     private EventLoopGroup group;
     private Channel serverChannel;
     private BlockingQueue<Channel> acceptedChannels;
+    private BlockingQueue<Throwable> serverExceptions;
 
     @BeforeEach
     public void setup() {
         group = new NioEventLoopGroup();
         acceptedChannels = new LinkedBlockingQueue<>();
+        serverExceptions = new LinkedBlockingQueue<>();
     }
 
     @AfterEach
@@ -79,6 +81,12 @@ public class RakCookieTests {
                 .handler(new ChannelInitializer<RakServerChannel>() {
                     @Override
                     protected void initChannel(RakServerChannel ch) {
+                        ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                            @Override
+                            public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
+                                serverExceptions.add(cause);
+                            }
+                        });
                     }
                 })
                 .childHandler(new ChannelInitializer<Channel>() {
@@ -326,6 +334,60 @@ public class RakCookieTests {
     }
 
     @Test
+    public void testShortOpenConnectionRequest1IsDroppedWithoutException() throws InterruptedException {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+
+        ByteBuf ocr1 = Unpooled.buffer();
+        ocr1.writeByte(ID_OPEN_CONNECTION_REQUEST_1);
+        ocr1.writeBytes(RakConstants.DEFAULT_UNCONNECTED_MAGIC);
+
+        assertMalformedOfflinePacketDropped(ocr1);
+    }
+
+    @Test
+    public void testShortOpenConnectionRequest2IsDroppedWithoutException() throws InterruptedException {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+
+        ByteBuf ocr2 = Unpooled.buffer();
+        ocr2.writeByte(ID_OPEN_CONNECTION_REQUEST_2);
+        ocr2.writeBytes(RakConstants.DEFAULT_UNCONNECTED_MAGIC);
+
+        assertMalformedOfflinePacketDropped(ocr2);
+    }
+
+    @Test
+    public void testOpenConnectionRequest2WithInvalidAddressTypeIsDroppedWithoutException() throws InterruptedException {
+        setupServer(RakServerCookieMode.ACTIVE, SECRET);
+
+        InetSocketAddress serverAddress = new InetSocketAddress("127.0.0.1", PORT);
+        BlockingQueue<DatagramPacket> responses = new LinkedBlockingQueue<>();
+        Channel rawClient = createRawClient(responses);
+
+        SipHash sipHash = new SipHash(SECRET);
+        int cookie = sipHash.generateStatelessCookie((InetSocketAddress) rawClient.localAddress(), PROTOCOL_VERSION);
+
+        ByteBuf ocr2 = Unpooled.buffer();
+        ocr2.writeByte(ID_OPEN_CONNECTION_REQUEST_2);
+        ocr2.writeBytes(RakConstants.DEFAULT_UNCONNECTED_MAGIC);
+        ocr2.writeInt(cookie);
+        ocr2.writeBoolean(false);
+        ocr2.writeByte(5); // Invalid address type.
+        ocr2.writeShort(RakConstants.MAXIMUM_MTU_SIZE);
+        ocr2.writeLong(12345L);
+
+        rawClient.writeAndFlush(new DatagramPacket(ocr2, serverAddress)).awaitUninterruptibly();
+
+        try {
+            Assertions.assertNull(responses.poll(300, TimeUnit.MILLISECONDS),
+                    "Server should not respond to OCR2 with an invalid address type");
+            Assertions.assertNull(serverExceptions.poll(300, TimeUnit.MILLISECONDS),
+                    "Malformed OCR2 should be dropped without propagating a pipeline exception");
+        } finally {
+            rawClient.close().awaitUninterruptibly();
+        }
+    }
+
+    @Test
     public void testRepeatedOpenConnectionRequest1StillReceivesReplies() throws InterruptedException {
         setupServer(RakServerCookieMode.ACTIVE, SECRET);
 
@@ -471,6 +533,40 @@ public class RakCookieTests {
 
             response.release();
         }
+    }
+
+    private void assertMalformedOfflinePacketDropped(ByteBuf content) throws InterruptedException {
+        InetSocketAddress serverAddress = new InetSocketAddress("127.0.0.1", PORT);
+        BlockingQueue<DatagramPacket> responses = new LinkedBlockingQueue<>();
+        Channel rawClient = createRawClient(responses);
+
+        rawClient.writeAndFlush(new DatagramPacket(content, serverAddress)).awaitUninterruptibly();
+
+        try {
+            Assertions.assertNull(responses.poll(300, TimeUnit.MILLISECONDS),
+                    "Server should not respond to a malformed offline packet");
+            Assertions.assertNull(serverExceptions.poll(300, TimeUnit.MILLISECONDS),
+                    "Malformed offline packet should be dropped without propagating a pipeline exception");
+        } finally {
+            rawClient.close().awaitUninterruptibly();
+        }
+    }
+
+    private Channel createRawClient(BlockingQueue<DatagramPacket> responses) {
+        return new Bootstrap()
+                .group(group)
+                .channel(NioDatagramChannel.class)
+                .handler(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        if (msg instanceof DatagramPacket) {
+                            responses.add(((DatagramPacket) msg).retain());
+                        }
+                    }
+                })
+                .bind(new InetSocketAddress("127.0.0.1", 0))
+                .awaitUninterruptibly()
+                .channel();
     }
 
     private RakServerChannel.ChildChannelCreationResult createChildChannel(

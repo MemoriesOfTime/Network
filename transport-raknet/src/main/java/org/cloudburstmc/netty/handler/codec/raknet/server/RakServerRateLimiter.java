@@ -30,8 +30,6 @@ import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPacket> {
     public static final String NAME = "rak-server-rate-limiter";
@@ -39,13 +37,13 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
 
     private final RakServerChannel channel;
 
-    private final ConcurrentHashMap<InetAddress, AtomicInteger> rateLimitMap = new ConcurrentHashMap<>();
+    private final Map<InetAddress, AddressCounters> rateLimitMap = new HashMap<>();
     private final Map<InetAddress, Long> blockedConnections = new ConcurrentHashMap<>();
     private final Map<InetAddress, InetSocketAddress> blockedConnectionSources = new ConcurrentHashMap<>();
 
     private final Collection<InetAddress> exceptions = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    private final AtomicLong globalCounter = new AtomicLong(0);
+    private int globalCounter;
 
     private ScheduledFuture<?> tickFuture;
     private ScheduledFuture<?> blockedTickFuture;
@@ -71,7 +69,7 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
 
     protected void onRakTick() {
         this.rateLimitMap.clear();
-        this.globalCounter.set(0);
+        this.globalCounter = 0;
     }
 
     protected void onBlockedTick() {
@@ -198,9 +196,9 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, DatagramPacket datagram) throws Exception {
-        if (this.globalCounter.incrementAndGet() > this.channel.config().getGlobalPacketLimit()) {
+        if (++this.globalCounter > this.channel.config().getGlobalPacketLimit()) {
             if (log.isTraceEnabled()) {
-                log.trace("[{}] Dropped incoming packet because global packet limit was reached: {}", datagram.sender(), this.globalCounter.get());
+                log.trace("[{}] Dropped incoming packet because global packet limit was reached: {}", datagram.sender(), this.globalCounter);
             }
             return;
         }
@@ -215,12 +213,21 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
             return;
         }
 
-        AtomicInteger counter = this.rateLimitMap.computeIfAbsent(address, a -> new AtomicInteger());
-        if (counter.incrementAndGet() > this.getAddressMaxPacketCount(effectiveAddress) &&
+        AddressCounters counter = this.rateLimitMap.get(address);
+        if (counter == null) {
+            counter = new AddressCounters();
+            this.rateLimitMap.put(address, counter);
+        }
+
+        if (++counter.total > this.getAddressMaxPacketCount(effectiveAddress) &&
                 this.blockAddress(effectiveAddress, 10, TimeUnit.SECONDS)) {
             log.warn("[{}] Blocked because packet limit was reached", effectiveAddress);
         } else {
             ctx.fireChannelRead(datagram.retain());
         }
+    }
+
+    private static final class AddressCounters {
+        int total;
     }
 }

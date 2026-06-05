@@ -88,10 +88,11 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
         ByteBuf buf = packet.content();
         short packetId = buf.readUnsignedByte();
 
-        ByteBuf magicBuf = ((RakServerChannelConfig) ctx.channel().config()).getUnconnectedMagic();
-        long guid = ((RakServerChannelConfig) ctx.channel().config()).getGuid();
+        RakServerChannelConfig config = (RakServerChannelConfig) ctx.channel().config();
+        ByteBuf magicBuf = config.getUnconnectedMagic();
+        long guid = config.getGuid();
 
-        RakServerMetrics metrics = this.channel.config().getMetrics();
+        RakServerMetrics metrics = config.getMetrics();
 
         switch (packetId) {
             case ID_UNCONNECTED_PING:
@@ -99,13 +100,51 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
                 this.onUnconnectedPing(ctx, packet, magicBuf, guid);
                 break;
             case ID_OPEN_CONNECTION_REQUEST_1:
+                if (!hasOpenConnectionRequest1Payload(buf, magicBuf.readableBytes())) {
+                    return;
+                }
                 if (metrics != null) metrics.connectionInitPacket(packet.sender(), ID_OPEN_CONNECTION_REQUEST_1);
                 this.onOpenConnectionRequest1(ctx, packet, magicBuf, guid);
                 break;
             case ID_OPEN_CONNECTION_REQUEST_2:
+                if (!hasOpenConnectionRequest2Payload(
+                        buf, magicBuf.readableBytes(), config.getCookieMode() != RakServerCookieMode.NONE)) {
+                    return;
+                }
                 if (metrics != null) metrics.connectionInitPacket(packet.sender(), ID_OPEN_CONNECTION_REQUEST_2);
                 this.onOpenConnectionRequest2(ctx, packet, magicBuf, guid);
                 break;
+        }
+    }
+
+    private static boolean hasOpenConnectionRequest1Payload(ByteBuf buffer, int magicLength) {
+        return buffer.readableBytes() >= magicLength + 1;
+    }
+
+    private static boolean hasOpenConnectionRequest2Payload(ByteBuf buffer, int magicLength, boolean expectCookie) {
+        int cookieLength = expectCookie ? Integer.BYTES + 1 : 0;
+        int prefixLength = magicLength + cookieLength;
+        if (buffer.readableBytes() < prefixLength + 1) {
+            return false;
+        }
+
+        int addressType = buffer.getUnsignedByte(buffer.readerIndex() + prefixLength);
+        int addressLength = getAddressLength(addressType);
+        if (addressLength == -1) {
+            return false;
+        }
+
+        return buffer.readableBytes() >= prefixLength + addressLength + Short.BYTES + Long.BYTES;
+    }
+
+    private static int getAddressLength(int addressType) {
+        switch (addressType) {
+            case 4:
+                return IPV4_MESSAGE_SIZE;
+            case 6:
+                return IPV6_MESSAGE_SIZE;
+            default:
+                return -1;
         }
     }
 
