@@ -59,6 +59,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -450,6 +451,117 @@ public class RakTests {
             routeChannel.finishAndReleaseAll();
             rejectingGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
         }
+    }
+
+    @Test
+    public void testServerRouteDropsDatagramWhenChildInboundQueueLimitExceeded() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        InetSocketAddress localAddress = new InetSocketAddress("127.0.0.1", 19132);
+        RakChildChannel child = newChildChannel(server, remoteAddress, localAddress);
+        child.config().setOption(RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT, 1);
+        EventLoopGroup childGroup = new DefaultEventLoopGroup(1);
+        CountDownLatch blockerStarted = new CountDownLatch(1);
+        CountDownLatch releaseBlocker = new CountDownLatch(1);
+        CountDownLatch routed = new CountDownLatch(1);
+        ByteBuf firstPayload = Unpooled.buffer(1).writeByte(1);
+        ByteBuf droppedPayload = Unpooled.buffer(1).writeByte(2);
+        EmbeddedChannel routeChannel = new EmbeddedChannel(new org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRouteHandler(server));
+
+        child.rakPipeline().addFirst("capture-routed", new SimpleChannelInboundHandler<ByteBuf>() {
+            @Override
+            protected void channelRead0(ChannelHandlerContext ctx, ByteBuf msg) {
+            }
+
+            @Override
+            public void channelReadComplete(ChannelHandlerContext ctx) {
+                routed.countDown();
+            }
+        });
+
+        try {
+            childGroup.register(child).syncUninterruptibly();
+            child.eventLoop().execute(() -> {
+                blockerStarted.countDown();
+                try {
+                    releaseBlocker.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            Assertions.assertTrue(blockerStarted.await(5, TimeUnit.SECONDS),
+                    "Child event loop blocker should start before routing datagrams");
+            childChannelMap(server).put(remoteAddress, child);
+
+            routeChannel.writeInbound(new DatagramPacket(firstPayload, localAddress, remoteAddress));
+            routeChannel.writeInbound(new DatagramPacket(droppedPayload, localAddress, remoteAddress));
+
+            Assertions.assertEquals(1, firstPayload.refCnt(),
+                    "First routed payload should stay retained while queued on the child event loop");
+            Assertions.assertEquals(0, droppedPayload.refCnt(),
+                    "Datagram over the child inbound queue limit should be dropped without retaining its payload");
+        } finally {
+            releaseBlocker.countDown();
+            if (child.isRegistered()) {
+                child.eventLoop().submit(() -> {
+                }).syncUninterruptibly();
+            }
+            routed.await(5, TimeUnit.SECONDS);
+            childChannelMap(server).remove(remoteAddress, child);
+            if (firstPayload.refCnt() > 0) {
+                firstPayload.release(firstPayload.refCnt());
+            }
+            if (droppedPayload.refCnt() > 0) {
+                droppedPayload.release(droppedPayload.refCnt());
+            }
+            routeChannel.finishAndReleaseAll();
+            childGroup.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        }
+    }
+
+    @Test
+    public void testServerRouteDropsDatagramWhenChildInboundQueueBytesExceeded() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        InetSocketAddress localAddress = new InetSocketAddress("127.0.0.1", 19132);
+        RakChildChannel child = newChildChannel(server, remoteAddress, localAddress);
+        child.config().setOption(RakChannelOption.RAK_CHILD_INBOUND_QUEUE_BYTES, 1);
+        ByteBuf payload = Unpooled.buffer(2).writeByte(1).writeByte(2);
+        EmbeddedChannel routeChannel = new EmbeddedChannel(new org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRouteHandler(server));
+
+        try {
+            childChannelMap(server).put(remoteAddress, child);
+
+            routeChannel.writeInbound(new DatagramPacket(payload, localAddress, remoteAddress));
+
+            Assertions.assertEquals(0, payload.refCnt(),
+                    "Datagram over the child inbound queue byte limit should be dropped without retaining its payload");
+        } finally {
+            childChannelMap(server).remove(remoteAddress, child);
+            if (payload.refCnt() > 0) {
+                payload.release(payload.refCnt());
+            }
+            routeChannel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void testChildRoutedDatagramAcquireReleaseAllowsNextDatagram() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 30000),
+                new InetSocketAddress("127.0.0.1", 19132));
+        child.config().setOption(RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT, 1);
+
+        Assertions.assertTrue(child.tryAcquireRoutedDatagram(1),
+                "First routed datagram should acquire the only pending slot");
+        Assertions.assertFalse(child.tryAcquireRoutedDatagram(1),
+                "Second routed datagram should be rejected while the only slot is pending");
+        child.releaseRoutedDatagram(1);
+        Assertions.assertTrue(child.tryAcquireRoutedDatagram(1),
+                "Releasing a routed datagram should make the pending slot available again");
+        child.releaseRoutedDatagram(1);
     }
 
     @Test

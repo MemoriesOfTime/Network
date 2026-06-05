@@ -190,6 +190,20 @@ public class RakChannelOption<T> extends ChannelOption<T> {
             valueOf(RakChannelOption.class, "RAK_MAX_QUEUED_BYTES");
 
     /**
+     * Maximum amount of datagrams that can be queued for routing from a server parent event loop to a child event loop.
+     * Values less than or equal to 0 disable this limit.
+     */
+    public static final ChannelOption<Integer> RAK_CHILD_INBOUND_QUEUE_LIMIT =
+            valueOf(RakChannelOption.class, "RAK_CHILD_INBOUND_QUEUE_LIMIT");
+
+    /**
+     * Maximum amount of datagram payload bytes that can be queued for routing from a server parent event loop to a child event loop.
+     * Values less than or equal to 0 disable this limit.
+     */
+    public static final ChannelOption<Integer> RAK_CHILD_INBOUND_QUEUE_BYTES =
+            valueOf(RakChannelOption.class, "RAK_CHILD_INBOUND_QUEUE_BYTES");
+
+    /**
      * The cookie mode the RakNet server will use when handling client connections.
      */
     public static final ChannelOption<RakServerCookieMode> RAK_SERVER_COOKIE_MODE =
