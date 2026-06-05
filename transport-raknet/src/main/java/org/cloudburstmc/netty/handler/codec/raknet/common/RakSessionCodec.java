@@ -50,6 +50,10 @@ import static org.cloudburstmc.netty.channel.raknet.RakConstants.*;
 public class RakSessionCodec extends ChannelDuplexHandler {
     private static final InternalLogger log = InternalLoggerFactory.getInstance(RakSessionCodec.class);
     public static final String NAME = "rak-session-codec";
+    private static final int MAX_RELIABLE_DATAGRAM_GAP = 4096;
+    private static final int MAX_ORDERING_INDEX_GAP = 4096;
+    private static final int MAX_ORDERING_HEAP_SIZE = 4096;
+    private static final int MAX_SPLIT_PACKET_COUNT = 64;
 
     private final RakChannel channel;
     private ScheduledFuture<?> tickFuture;
@@ -86,6 +90,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     private long lastMinWeight;
 
     private int queuedBytes = 0;
+    private int splitPacketCount;
 
     public RakSessionCodec(RakChannel channel) {
         this.channel = channel;
@@ -150,6 +155,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             }
         }
         this.splitPackets = null;
+        this.splitPacketCount = 0;
 
         for (RakDatagramPacket packet : this.sentDatagrams.values()) {
             packet.release();
@@ -305,6 +311,10 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         for (final EncapsulatedPacket encapsulated : packet.getPackets()) {
             if (encapsulated.getReliability().isReliable()) {
                 int missed = encapsulated.getReliabilityIndex() - this.reliabilityReadIndex;
+                if (missed > MAX_RELIABLE_DATAGRAM_GAP) {
+                    this.close(RakDisconnectReason.BAD_PACKET);
+                    return;
+                }
                 if (missed > 0) {
                     if (missed < this.reliableDatagramQueue.size()) {
                         if (this.reliableDatagramQueue.get(missed)) {
@@ -341,6 +351,9 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 final EncapsulatedPacket reassembled = this.getReassembledPacket(encapsulated, ctx.alloc());
                 if (reassembled == null) {
                     // Not reassembled
+                    if (this.state == RakState.DISCONNECTING) {
+                        return;
+                    }
                     continue;
                 }
                 if (metrics != null) {
@@ -348,6 +361,9 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 }
                 try {
                     this.checkForOrdered(ctx, reassembled);
+                    if (this.state == RakState.DISCONNECTING) {
+                        return;
+                    }
                 } finally {
                     reassembled.release();
                 }
@@ -356,12 +372,25 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                     metrics.encapsulatedIn(1);
                 }
                 this.checkForOrdered(ctx, encapsulated);
+                if (this.state == RakState.DISCONNECTING) {
+                    return;
+                }
             }
         }
     }
 
     private void checkForOrdered(ChannelHandlerContext ctx, EncapsulatedPacket packet) {
         if (packet.getReliability().isOrdered()) {
+            int orderingChannel = packet.getOrderingChannel();
+            if (orderingChannel < 0 || orderingChannel >= this.orderingHeaps.length) {
+                this.close(RakDisconnectReason.BAD_PACKET);
+                return;
+            }
+            int missed = packet.getOrderingIndex() - this.orderReadIndex[orderingChannel];
+            if (missed > MAX_ORDERING_INDEX_GAP) {
+                this.close(RakDisconnectReason.BAD_PACKET);
+                return;
+            }
             this.onOrderedReceived(ctx, packet);
         } else {
             ctx.fireChannelRead(packet.retain());
@@ -369,27 +398,32 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     }
 
     private void onOrderedReceived(ChannelHandlerContext ctx, EncapsulatedPacket packet) {
-        FastBinaryMinHeap<EncapsulatedPacket> binaryHeap = this.orderingHeaps[packet.getOrderingChannel()];
-        if (this.orderReadIndex[packet.getOrderingChannel()] < packet.getOrderingIndex()) {
+        int orderingChannel = packet.getOrderingChannel();
+        FastBinaryMinHeap<EncapsulatedPacket> binaryHeap = this.orderingHeaps[orderingChannel];
+        if (this.orderReadIndex[orderingChannel] < packet.getOrderingIndex()) {
             // Not next in line so add to queue.
+            if (binaryHeap.size() >= MAX_ORDERING_HEAP_SIZE) {
+                this.close(RakDisconnectReason.BAD_PACKET);
+                return;
+            }
             binaryHeap.insert(packet.getOrderingIndex(), packet.retain());
             return;
-        } else if (this.orderReadIndex[packet.getOrderingChannel()] > packet.getOrderingIndex()) {
+        } else if (this.orderReadIndex[orderingChannel] > packet.getOrderingIndex()) {
             // We already have this
             return;
         }
-        this.orderReadIndex[packet.getOrderingChannel()]++;
+        this.orderReadIndex[orderingChannel]++;
 
         // Can be handled
         ctx.fireChannelRead(packet.retain());
 
         EncapsulatedPacket queuedPacket;
         while ((queuedPacket = binaryHeap.peek()) != null) {
-            if (queuedPacket.getOrderingIndex() == this.orderReadIndex[packet.getOrderingChannel()]) {
+            if (queuedPacket.getOrderingIndex() == this.orderReadIndex[orderingChannel]) {
                 try {
                     // We got the expected packet
                     binaryHeap.remove();
-                    this.orderReadIndex[packet.getOrderingChannel()]++;
+                    this.orderReadIndex[orderingChannel]++;
                     ctx.fireChannelRead(queuedPacket.retain());
                 } finally {
                     queuedPacket.release();
@@ -406,14 +440,34 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         SplitPacketHelper helper = this.splitPackets.get(splitPacket.getPartId());
         if (helper == null) {
-            this.splitPackets.set(splitPacket.getPartId(), helper = new SplitPacketHelper(splitPacket.getPartCount()));
+            if (this.splitPacketCount >= MAX_SPLIT_PACKET_COUNT) {
+                this.close(RakDisconnectReason.BAD_PACKET);
+                return null;
+            }
+            try {
+                helper = new SplitPacketHelper(splitPacket.getPartCount());
+            } catch (IllegalArgumentException e) {
+                this.close(RakDisconnectReason.BAD_PACKET);
+                return null;
+            }
+            this.splitPackets.set(splitPacket.getPartId(), helper);
+            this.splitPacketCount++;
         }
 
         // Try reassembling the packet.
-        EncapsulatedPacket result = helper.add(splitPacket, alloc);
+        EncapsulatedPacket result;
+        try {
+            result = helper.add(splitPacket, alloc);
+        } catch (IllegalArgumentException e) {
+            this.splitPackets.remove(splitPacket.getPartId(), helper);
+            this.splitPacketCount = Math.max(0, this.splitPacketCount - 1);
+            this.close(RakDisconnectReason.BAD_PACKET);
+            return null;
+        }
         if (result != null) {
             // Packet reassembled. Remove the helper
             this.splitPackets.remove(splitPacket.getPartId(), helper);
+            this.splitPacketCount = Math.max(0, this.splitPacketCount - 1);
         }
 
         return result;
@@ -437,6 +491,8 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             this.disconnect(RakDisconnectReason.QUEUE_TOO_LONG);
             return;
         }
+
+        this.expireSplitPackets();
 
         RakChannelMetrics metrics = this.getMetrics();
         if (metrics != null) {
@@ -466,6 +522,21 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         }
 
          this.internalFlush(ctx);
+    }
+
+    private void expireSplitPackets() {
+        if (this.splitPacketCount == 0 || this.splitPackets == null) {
+            return;
+        }
+
+        Iterator<SplitPacketHelper> iterator = this.splitPackets.iterator();
+        while (iterator.hasNext()) {
+            SplitPacketHelper helper = iterator.next();
+            if (helper != null && helper.expired()) {
+                iterator.remove();
+                this.splitPacketCount = Math.max(0, this.splitPacketCount - 1);
+            }
+        }
     }
 
     private void internalFlush(ChannelHandlerContext ctx) {
@@ -824,7 +895,18 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             log.debug("Closing RakNet Session ({} => {}) due to {}", this.channel.localAddress(), this.getRemoteAddress(), reason);
         }
 
-        this.channel.pipeline().fireUserEventTriggered(reason).close();
+        try {
+            this.channel.pipeline().fireUserEventTriggered(reason).close();
+        } catch (RuntimeException e) {
+            if (log.isDebugEnabled()) {
+                log.debug("Failed to close RakNet Session ({} => {}) due to {}", this.channel.localAddress(), this.getRemoteAddress(), reason, e);
+            }
+            try {
+                this.channel.close();
+            } catch (RuntimeException ignored) {
+                // The close path must not turn malformed input handling into an exception hot path.
+            }
+        }
     }
 
     public boolean isClosed() {

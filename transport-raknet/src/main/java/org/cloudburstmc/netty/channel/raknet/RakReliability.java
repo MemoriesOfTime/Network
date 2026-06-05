@@ -51,7 +51,7 @@ public enum RakReliability {
             size += 3;
         }
 
-        if (this.ordered) {
+        if (this.ordered || this.sequenced) {
             size += 4;
         }
         this.size = size;

@@ -32,8 +32,14 @@ import org.cloudburstmc.netty.channel.raknet.*;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
 import org.cloudburstmc.netty.channel.raknet.packet.EncapsulatedPacket;
 import org.cloudburstmc.netty.channel.raknet.packet.RakMessage;
+import org.cloudburstmc.netty.channel.raknet.packet.RakDatagramPacket;
+import org.cloudburstmc.netty.handler.codec.raknet.common.RakAcknowledgeHandler;
+import org.cloudburstmc.netty.handler.codec.raknet.common.RakDatagramCodec;
 import org.cloudburstmc.netty.handler.codec.raknet.common.RakSessionCodec;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerOnlineInitialHandler;
+import org.cloudburstmc.netty.util.BitQueue;
+import org.cloudburstmc.netty.util.FastBinaryMinHeap;
+import org.cloudburstmc.netty.util.RoundRobinArray;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,6 +54,7 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -162,6 +169,34 @@ public class RakTests {
     private RakChildChannel registerChildChannel(RakChildChannel child) {
         this.serverChildGroup.register(child).syncUninterruptibly();
         return this.track(child);
+    }
+
+    @SuppressWarnings("unchecked")
+    private RakSessionCodec newInboundSessionCodec(RakChildChannel child) throws Exception {
+        RakSessionCodec sessionCodec = new RakSessionCodec(child);
+        this.setSessionField(sessionCodec, "state", RakState.CONNECTED);
+        this.setSessionField(sessionCodec, "slidingWindow", new RakSlidingWindow(RakConstants.MAXIMUM_MTU_SIZE));
+        this.setSessionField(sessionCodec, "outgoingAcks", new ArrayDeque<>());
+        this.setSessionField(sessionCodec, "outgoingNaks", new ArrayDeque<>());
+        this.setSessionField(sessionCodec, "reliableDatagramQueue", new BitQueue(512));
+        this.setSessionField(sessionCodec, "splitPackets", new RoundRobinArray<>(256));
+        this.setSessionField(sessionCodec, "orderReadIndex", new int[1]);
+        this.setSessionField(sessionCodec, "orderWriteIndex", new int[1]);
+        this.setSessionField(sessionCodec, "orderingHeaps", new FastBinaryMinHeap[]{new FastBinaryMinHeap<EncapsulatedPacket>(64)});
+        return sessionCodec;
+    }
+
+    private void setSessionField(RakSessionCodec sessionCodec, String name, Object value) throws Exception {
+        Field field = RakSessionCodec.class.getDeclaredField(name);
+        field.setAccessible(true);
+        field.set(sessionCodec, value);
+    }
+
+    private void handleDatagram(RakSessionCodec sessionCodec, ChannelHandlerContext ctx, RakDatagramPacket datagram) throws Exception {
+        Method handleDatagram = RakSessionCodec.class.getDeclaredMethod(
+                "handleDatagram", ChannelHandlerContext.class, RakDatagramPacket.class);
+        handleDatagram.setAccessible(true);
+        handleDatagram.invoke(sessionCodec, ctx, datagram);
     }
 
     private ServerBootstrap serverBootstrap() {
@@ -526,6 +561,173 @@ public class RakTests {
 
         outboundMessages.forEach(ByteBuf::release);
         channel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testReliableSequencedDatagramDecodesWithoutSignedReliabilityOverflow() {
+        EmbeddedChannel channel = new EmbeddedChannel(new RakDatagramCodec());
+        ByteBuf datagram = Unpooled.buffer();
+        datagram.writeByte(RakConstants.FLAG_VALID);
+        datagram.writeMediumLE(0);
+        datagram.writeByte(RakReliability.RELIABLE_SEQUENCED.ordinal() << 5);
+        datagram.writeShort(8);
+        datagram.writeMediumLE(0);
+        datagram.writeMediumLE(0);
+        datagram.writeMediumLE(0);
+        datagram.writeByte(0);
+        datagram.writeByte(0x42);
+
+        Assertions.assertDoesNotThrow(() -> channel.writeInbound(datagram),
+                "High-bit reliability values should decode without signed byte overflow");
+
+        RakDatagramPacket packet = channel.readInbound();
+        try {
+            Assertions.assertNotNull(packet, "A valid RakNet datagram should decode to a RakDatagramPacket");
+            Assertions.assertEquals(RakReliability.RELIABLE_SEQUENCED,
+                    packet.getPackets().get(0).getReliability(),
+                    "Reliability id 4 should decode as RELIABLE_SEQUENCED");
+        } finally {
+            ReferenceCountUtil.release(packet);
+            channel.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void testHugeReliableGapDoesNotGrowReceiveQueue() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132));
+        RakSessionCodec sessionCodec = this.newInboundSessionCodec(child);
+        EmbeddedChannel contextChannel = new EmbeddedChannel(new ChannelInboundHandlerAdapter());
+
+        RakDatagramPacket datagram = RakDatagramPacket.newInstance();
+        datagram.setSequenceIndex(0);
+
+        EncapsulatedPacket encapsulated = EncapsulatedPacket.newInstance();
+        encapsulated.setReliability(RakReliability.RELIABLE);
+        encapsulated.setReliabilityIndex(8192);
+        encapsulated.setBuffer(Unpooled.buffer(1).writeByte(0x42));
+        datagram.getPackets().add(encapsulated);
+
+        Assertions.assertDoesNotThrow(() -> this.handleDatagram(
+                        sessionCodec, contextChannel.pipeline().firstContext(), datagram),
+                "A huge reliable index gap should not throw through the session pipeline");
+
+        Field reliableDatagramQueueField = RakSessionCodec.class.getDeclaredField("reliableDatagramQueue");
+        reliableDatagramQueueField.setAccessible(true);
+        BitQueue reliableDatagramQueue = (BitQueue) reliableDatagramQueueField.get(sessionCodec);
+        Assertions.assertTrue(reliableDatagramQueue.size() <= 512,
+                "A huge reliable index gap should not be allowed to grow the receive queue");
+
+        datagram.release();
+        contextChannel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testInvalidOrderingChannelDoesNotThrowOrQueuePacket() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132));
+        RakSessionCodec sessionCodec = this.newInboundSessionCodec(child);
+        EmbeddedChannel contextChannel = new EmbeddedChannel(new ChannelInboundHandlerAdapter());
+
+        RakDatagramPacket datagram = RakDatagramPacket.newInstance();
+        datagram.setSequenceIndex(0);
+
+        EncapsulatedPacket encapsulated = EncapsulatedPacket.newInstance();
+        encapsulated.setReliability(RakReliability.RELIABLE_ORDERED);
+        encapsulated.setReliabilityIndex(0);
+        encapsulated.setOrderingIndex(0);
+        encapsulated.setOrderingChannel((short) 1);
+        encapsulated.setBuffer(Unpooled.buffer(1).writeByte(0x42));
+        datagram.getPackets().add(encapsulated);
+
+        Assertions.assertDoesNotThrow(() -> this.handleDatagram(
+                        sessionCodec, contextChannel.pipeline().firstContext(), datagram),
+                "An out-of-range ordering channel should be treated as a bad packet, not an uncaught exception");
+
+        Field orderingHeapsField = RakSessionCodec.class.getDeclaredField("orderingHeaps");
+        orderingHeapsField.setAccessible(true);
+        FastBinaryMinHeap<EncapsulatedPacket>[] orderingHeaps =
+                (FastBinaryMinHeap<EncapsulatedPacket>[]) orderingHeapsField.get(sessionCodec);
+        Assertions.assertEquals(0, orderingHeaps[0].size(),
+                "Invalid ordering channels should not enqueue packets into any ordering heap");
+
+        datagram.release();
+        contextChannel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testIncompleteSplitPacketsAreCappedPerSession() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132));
+        RakSessionCodec sessionCodec = this.newInboundSessionCodec(child);
+        EmbeddedChannel contextChannel = new EmbeddedChannel(new ChannelInboundHandlerAdapter());
+
+        for (int i = 0; i < 65; i++) {
+            RakDatagramPacket datagram = RakDatagramPacket.newInstance();
+            datagram.setSequenceIndex(i);
+
+            EncapsulatedPacket encapsulated = EncapsulatedPacket.newInstance();
+            encapsulated.setReliability(RakReliability.RELIABLE);
+            encapsulated.setReliabilityIndex(i);
+            encapsulated.setSplit(true);
+            encapsulated.setPartCount(2);
+            encapsulated.setPartId(i);
+            encapsulated.setPartIndex(0);
+            encapsulated.setBuffer(Unpooled.buffer(1).writeByte(0x42));
+            datagram.getPackets().add(encapsulated);
+
+            this.handleDatagram(sessionCodec, contextChannel.pipeline().firstContext(), datagram);
+            datagram.release();
+        }
+
+        Field splitPacketsField = RakSessionCodec.class.getDeclaredField("splitPackets");
+        splitPacketsField.setAccessible(true);
+        int incompleteSplits = 0;
+        for (Object helper : (Iterable<?>) splitPacketsField.get(sessionCodec)) {
+            if (helper != null) {
+                incompleteSplits++;
+            }
+        }
+        Assertions.assertTrue(incompleteSplits <= 64,
+                "A session should cap incomplete split packet reassembly state");
+
+        contextChannel.finishAndReleaseAll();
+    }
+
+    @Test
+    public void testTruncatedAcknowledgePacketDoesNotThrowThroughPipeline() throws Exception {
+        ByteBuf[] packets = {
+                Unpooled.buffer(1).writeByte(RakConstants.FLAG_VALID | RakConstants.FLAG_ACK),
+                Unpooled.buffer(2)
+                        .writeByte(RakConstants.FLAG_VALID | RakConstants.FLAG_ACK)
+                        .writeByte(0),
+                Unpooled.buffer(3)
+                        .writeByte(RakConstants.FLAG_VALID | RakConstants.FLAG_ACK)
+                        .writeShort(1)
+        };
+
+        for (ByteBuf ack : packets) {
+            RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+            RakChildChannel child = newChildChannel(
+                    server,
+                    new InetSocketAddress("127.0.0.1", 19132),
+                    new InetSocketAddress("127.0.0.1", 19132));
+            RakSessionCodec sessionCodec = this.newInboundSessionCodec(child);
+            EmbeddedChannel channel = new EmbeddedChannel(new RakAcknowledgeHandler(sessionCodec));
+
+            Assertions.assertDoesNotThrow(() -> channel.writeInbound(ack),
+                    "Truncated ACK/NACK payloads should be rejected without an uncaught decoder exception");
+            channel.finishAndReleaseAll();
+        }
     }
 
 

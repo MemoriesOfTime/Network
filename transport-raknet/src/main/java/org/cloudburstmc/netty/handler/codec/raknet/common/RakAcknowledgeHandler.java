@@ -58,14 +58,36 @@ public class RakAcknowledgeHandler extends SimpleChannelInboundHandler<ByteBuf> 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, ByteBuf buffer) throws Exception {
         boolean nack = (buffer.readByte() & FLAG_NACK) != 0;
+        if (!buffer.isReadable(2)) {
+            this.sessionCodec.close(RakDisconnectReason.BAD_PACKET);
+            return;
+        }
         int entriesCount = buffer.readUnsignedShort();
+
+        if (entriesCount > buffer.readableBytes() / 4) {
+            this.sessionCodec.close(RakDisconnectReason.BAD_PACKET);
+            return;
+        }
 
         Queue<IntRange> queue = this.sessionCodec.getAcknowledgeQueue(nack);
         for (int i = 0; i < entriesCount; i++) {
+            if (!buffer.isReadable(4)) {
+                this.sessionCodec.close(RakDisconnectReason.BAD_PACKET);
+                return;
+            }
             boolean singleton = buffer.readBoolean();
             int start = buffer.readUnsignedMediumLE();
             // We don't need the upper limit if it's a singleton
-            int end = singleton ? start : buffer.readUnsignedMediumLE();
+            int end;
+            if (singleton) {
+                end = start;
+            } else {
+                if (!buffer.isReadable(3)) {
+                    this.sessionCodec.close(RakDisconnectReason.BAD_PACKET);
+                    return;
+                }
+                end = buffer.readUnsignedMediumLE();
+            }
 
             if (start <= end) {
                 queue.offer(new IntRange(start, end));

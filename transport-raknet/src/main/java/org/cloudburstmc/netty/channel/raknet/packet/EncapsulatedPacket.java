@@ -88,11 +88,23 @@ public class EncapsulatedPacket extends AbstractReferenceCounted {
     }
 
     public void decode(ByteBuf buf) {
-        byte flags = buf.readByte();
+        if (buf.readableBytes() < 3) {
+            throw new IllegalArgumentException("Encapsulated packet header is too short");
+        }
+
+        int flags = buf.readUnsignedByte();
         this.reliability = RakReliability.fromId(flags >>> 5);
+        if (this.reliability == null) {
+            throw new IllegalArgumentException("Unknown RakNet reliability id " + (flags >>> 5));
+        }
         this.split = (flags & RakConstants.FLAG_PACKET_PAIR) != 0;
         this.needsBAS = (flags & RakConstants.FLAG_NEEDS_B_AND_AS) != 0;
         int size = (buf.readUnsignedShort() + 7) >> 3;
+
+        int headerSize = this.reliability.getSize() + (this.split ? 10 : 0);
+        if (buf.readableBytes() < headerSize + size) {
+            throw new IllegalArgumentException("Encapsulated packet is shorter than its declared header and payload");
+        }
 
         if (this.reliability.isReliable()) {
             this.reliabilityIndex = buf.readUnsignedMediumLE();
@@ -270,4 +282,3 @@ public class EncapsulatedPacket extends AbstractReferenceCounted {
                 '}';
     }
 }
-
