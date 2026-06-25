@@ -21,6 +21,7 @@ import io.netty.util.ReferenceCountUtil;
 import org.cloudburstmc.netty.channel.raknet.config.DefaultChannelToServerProxyMetrics;
 import org.cloudburstmc.netty.channel.raknet.config.DefaultRakSessionConfig;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelConfig;
+import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
 import org.cloudburstmc.netty.handler.codec.raknet.common.*;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakChildDatagramHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerOnlineInitialHandler;
@@ -29,6 +30,8 @@ import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.NonWritableChannelException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 public class RakChildChannel extends AbstractChannel implements RakChannel {
@@ -38,14 +41,18 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     private final RakChannelConfig config;
     private final InetSocketAddress remoteAddress;
     private final InetSocketAddress localAddress;
+    private final InetSocketAddress clientAddress;
     private final DefaultChannelPipeline rakPipeline;
+    private final AtomicInteger pendingRoutedDatagrams = new AtomicInteger();
+    private final AtomicLong pendingRoutedBytes = new AtomicLong();
     private volatile boolean open = true;
     private volatile boolean active;
 
-    RakChildChannel(InetSocketAddress remoteAddress, InetSocketAddress localAddress, RakServerChannel parent, long guid, int mtu, Consumer<RakChannel> childConsumer) {
+    RakChildChannel(InetSocketAddress remoteAddress, InetSocketAddress localAddress, InetSocketAddress clientAddress, RakServerChannel parent, long guid, int mtu, Consumer<RakChannel> childConsumer) {
         super(parent);
         this.remoteAddress = remoteAddress;
         this.localAddress = localAddress;
+        this.clientAddress = clientAddress;
         this.config = new DefaultRakSessionConfig(this, new DefaultChannelToServerProxyMetrics(parent, this));
         this.config.setGuid(guid);
         this.config.setMtu(mtu);
@@ -85,7 +92,7 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
 
     @Override
     public SocketAddress remoteAddress0() {
-        return this.remoteAddress;
+        return this.clientAddress;
     }
 
     @Override
@@ -96,6 +103,56 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     @Override
     public InetSocketAddress remoteAddress() {
         return (InetSocketAddress) super.remoteAddress();
+    }
+
+    public InetSocketAddress remoteOrProxyAddress() {
+        return remoteAddress;
+    }
+
+    public boolean tryAcquireRoutedDatagram(int bytes) {
+        if (!tryIncrementPendingRoutedDatagrams()) {
+            return false;
+        }
+        if (!tryAddPendingRoutedBytes(bytes)) {
+            this.pendingRoutedDatagrams.decrementAndGet();
+            return false;
+        }
+        return true;
+    }
+
+    public void releaseRoutedDatagram(int bytes) {
+        this.pendingRoutedDatagrams.decrementAndGet();
+        if (bytes > 0) {
+            this.pendingRoutedBytes.addAndGet(-bytes);
+        }
+    }
+
+    private boolean tryIncrementPendingRoutedDatagrams() {
+        int limit = this.config.getOption(RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT);
+        for (; ; ) {
+            int pending = this.pendingRoutedDatagrams.get();
+            if (limit > 0 && pending >= limit) {
+                return false;
+            }
+            if (this.pendingRoutedDatagrams.compareAndSet(pending, pending + 1)) {
+                return true;
+            }
+        }
+    }
+
+    private boolean tryAddPendingRoutedBytes(int bytes) {
+        int limit = this.config.getOption(RakChannelOption.RAK_CHILD_INBOUND_QUEUE_BYTES);
+        int pendingBytes = Math.max(bytes, 0);
+        for (; ; ) {
+            long pending = this.pendingRoutedBytes.get();
+            long next = pending + pendingBytes;
+            if (limit > 0 && next > limit) {
+                return false;
+            }
+            if (this.pendingRoutedBytes.compareAndSet(pending, next)) {
+                return true;
+            }
+        }
     }
 
     @Override

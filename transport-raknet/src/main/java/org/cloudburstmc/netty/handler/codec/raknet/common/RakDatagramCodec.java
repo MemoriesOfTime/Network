@@ -78,7 +78,9 @@ public class RakDatagramCodec extends MessageToMessageCodec<ByteBuf, RakDatagram
                     encapsulated.decode(buffer);
                     packet.getPackets().add(encapsulated.retain());
                 } catch (Throwable t) {
-                    log.error("Error decoding encapsulated packet", t); // TODO: this is just temporary for debugging
+                    if (log.isDebugEnabled()) {
+                        log.debug("Error decoding encapsulated packet", t);
+                    }
                     throw t;
                 } finally {
                     encapsulated.release();

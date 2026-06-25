@@ -39,7 +39,15 @@ public interface RakServerMetrics {
     default void addressBlocked(InetAddress address) {
     }
 
+    default void addressBlocked(InetSocketAddress address) {
+        this.addressBlocked(address.getAddress());
+    }
+
     default void addressUnblocked(InetAddress address) {
+    }
+
+    default void addressUnblocked(InetSocketAddress address) {
+        this.addressUnblocked(address.getAddress());
     }
 
     default void invalidCookie(InetSocketAddress address) {

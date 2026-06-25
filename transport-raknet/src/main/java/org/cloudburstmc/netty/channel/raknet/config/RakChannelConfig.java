@@ -55,4 +55,12 @@ public interface RakChannelConfig extends ChannelConfig {
     void setMaxQueuedBytes(int maxQueuedBytes);
 
     int getMaxQueuedBytes();
+
+    void setChildInboundQueueLimit(int childInboundQueueLimit);
+
+    int getChildInboundQueueLimit();
+
+    void setChildInboundQueueBytes(int childInboundQueueBytes);
+
+    int getChildInboundQueueBytes();
 }

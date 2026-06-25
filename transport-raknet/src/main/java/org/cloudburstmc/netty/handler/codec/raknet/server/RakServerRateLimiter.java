@@ -26,11 +26,10 @@ import org.cloudburstmc.netty.channel.raknet.RakServerChannel;
 import org.cloudburstmc.netty.channel.raknet.config.RakServerMetrics;
 
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPacket> {
     public static final String NAME = "rak-server-rate-limiter";
@@ -38,12 +37,13 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
 
     private final RakServerChannel channel;
 
-    private final ConcurrentHashMap<InetAddress, AtomicInteger> rateLimitMap = new ConcurrentHashMap<>();
+    private final Map<InetAddress, AddressCounters> rateLimitMap = new HashMap<>();
     private final Map<InetAddress, Long> blockedConnections = new ConcurrentHashMap<>();
+    private final Map<InetAddress, InetSocketAddress> blockedConnectionSources = new ConcurrentHashMap<>();
 
     private final Collection<InetAddress> exceptions = Collections.newSetFromMap(new ConcurrentHashMap<>());
 
-    private final AtomicLong globalCounter = new AtomicLong(0);
+    private int globalCounter;
 
     private ScheduledFuture<?> tickFuture;
     private ScheduledFuture<?> blockedTickFuture;
@@ -63,11 +63,13 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
         this.tickFuture.cancel(false);
         this.blockedTickFuture.cancel(true);
         this.rateLimitMap.clear();
+        this.blockedConnections.clear();
+        this.blockedConnectionSources.clear();
     }
 
     protected void onRakTick() {
         this.rateLimitMap.clear();
-        this.globalCounter.set(0);
+        this.globalCounter = 0;
     }
 
     protected void onBlockedTick() {
@@ -80,50 +82,103 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
             Map.Entry<InetAddress, Long> entry = iterator.next();
             if (entry.getValue() != 0 && currTime > entry.getValue()) {
                 iterator.remove();
+                InetSocketAddress sourceAddress = this.blockedConnectionSources.remove(entry.getKey());
                 log.info("Unblocked address {}", entry.getKey());
                 if (metrics != null) {
-                    metrics.addressUnblocked(entry.getKey());
+                    if (sourceAddress != null) {
+                        metrics.addressUnblocked(sourceAddress);
+                    } else {
+                        metrics.addressUnblocked(entry.getKey());
+                    }
                 }
             }
         }
     }
 
     public boolean blockAddress(InetAddress address, long time, TimeUnit unit) {
+        return this.blockAddress(address, null, time, unit);
+    }
+
+    public boolean blockAddress(InetSocketAddress address, long time, TimeUnit unit) {
+        Objects.requireNonNull(address, "address");
+        return this.blockAddress(address.getAddress(), address, time, unit);
+    }
+
+    private boolean blockAddress(InetAddress address, InetSocketAddress sourceAddress, long time, TimeUnit unit) {
+        Objects.requireNonNull(address, "address");
         if (this.exceptions.contains(address)) {
             return false;
         }
 
         long millis = unit.toMillis(time);
         this.blockedConnections.put(address, System.currentTimeMillis() + millis);
+        if (sourceAddress != null) {
+            this.blockedConnectionSources.put(address, sourceAddress);
+        } else {
+            this.blockedConnectionSources.remove(address);
+        }
 
         if (this.channel.config().getMetrics() != null) {
-            this.channel.config().getMetrics().addressBlocked(address);
+            if (sourceAddress != null) {
+                this.channel.config().getMetrics().addressBlocked(sourceAddress);
+            } else {
+                this.channel.config().getMetrics().addressBlocked(address);
+            }
         }
         return true;
     }
 
     public void unblockAddress(InetAddress address) {
+        Objects.requireNonNull(address, "address");
         if (this.blockedConnections.remove(address) == null) {
             return;
         }
 
+        InetSocketAddress sourceAddress = this.blockedConnectionSources.remove(address);
         log.info("Unblocked address {}", address);
 
         if (this.channel.config().getMetrics() != null) {
-            this.channel.config().getMetrics().addressUnblocked(address);
+            if (sourceAddress != null) {
+                this.channel.config().getMetrics().addressUnblocked(sourceAddress);
+            } else {
+                this.channel.config().getMetrics().addressUnblocked(address);
+            }
         }
     }
 
+    public void unblockAddress(InetSocketAddress address) {
+        Objects.requireNonNull(address, "address");
+        this.unblockAddress(address.getAddress());
+    }
+
     public boolean isAddressBlocked(InetAddress address) {
+        Objects.requireNonNull(address, "address");
         return this.blockedConnections.containsKey(address);
     }
 
+    public boolean isAddressBlocked(InetSocketAddress address) {
+        Objects.requireNonNull(address, "address");
+        return this.isAddressBlocked(address.getAddress());
+    }
+
     public void addException(InetAddress address) {
+        Objects.requireNonNull(address, "address");
         this.exceptions.add(address);
     }
 
+    public void addException(InetSocketAddress address) {
+        Objects.requireNonNull(address, "address");
+        this.addException(address.getAddress());
+    }
+
     public void removeException(InetAddress address) {
+        Objects.requireNonNull(address, "address");
         this.exceptions.remove(address);
+    }
+
+    public void removeException(InetSocketAddress address) {
+        Objects.requireNonNull(address, "address");
+        this.removeException(address.getAddress());
     }
 
     public Collection<InetAddress> getExceptions() {
@@ -134,26 +189,45 @@ public class RakServerRateLimiter extends SimpleChannelInboundHandler<DatagramPa
         return this.channel.config().getPacketLimit();
     }
 
+    protected int getAddressMaxPacketCount(InetSocketAddress address) {
+        Objects.requireNonNull(address, "address");
+        return this.getAddressMaxPacketCount(address.getAddress());
+    }
+
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, DatagramPacket datagram) throws Exception {
-        if (this.globalCounter.incrementAndGet() > this.channel.config().getGlobalPacketLimit()) {
+        if (++this.globalCounter > this.channel.config().getGlobalPacketLimit()) {
             if (log.isTraceEnabled()) {
-                log.trace("[{}] Dropped incoming packet because global packet limit was reached: {}", datagram.sender(), this.globalCounter.get());
+                log.trace("[{}] Dropped incoming packet because global packet limit was reached: {}", datagram.sender(), this.globalCounter);
             }
             return;
         }
 
-        InetAddress address = datagram.sender().getAddress();
+        InetSocketAddress effectiveAddress = this.channel.getClientAddress(datagram.sender());
+        if (effectiveAddress == null) {
+            return;
+        }
+
+        InetAddress address = effectiveAddress.getAddress();
         if (this.blockedConnections.containsKey(address)) {
             return;
         }
 
-        AtomicInteger counter = this.rateLimitMap.computeIfAbsent(address, a -> new AtomicInteger());
-        if (counter.incrementAndGet() > this.getAddressMaxPacketCount(address) &&
-                this.blockAddress(address, 10, TimeUnit.SECONDS)) {
-            log.warn("[{}] Blocked because packet limit was reached", address);
+        AddressCounters counter = this.rateLimitMap.get(address);
+        if (counter == null) {
+            counter = new AddressCounters();
+            this.rateLimitMap.put(address, counter);
+        }
+
+        if (++counter.total > this.getAddressMaxPacketCount(effectiveAddress) &&
+                this.blockAddress(effectiveAddress, 10, TimeUnit.SECONDS)) {
+            log.warn("[{}] Blocked because packet limit was reached", effectiveAddress);
         } else {
             ctx.fireChannelRead(datagram.retain());
         }
+    }
+
+    private static final class AddressCounters {
+        int total;
     }
 }

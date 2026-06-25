@@ -52,20 +52,36 @@ public class RakServerRouteHandler extends ChannelDuplexHandler {
                 return;
             }
 
+            int bytes = packet.content().readableBytes();
             RakChannelMetrics metrics = channel.config().getMetrics();
             if (metrics != null) {
-                metrics.bytesIn(packet.content().readableBytes());
+                metrics.bytesIn(bytes);
+            }
+
+            if (!channel.tryAcquireRoutedDatagram(bytes)) {
+                return;
             }
 
             // In this case remote address is already known from ChannelHandlerContext
             // so we can pass only payload.
             ByteBuf buffer = packet.content().retain();
             if (channel.eventLoop().inEventLoop()) {
-                channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete();
+                try {
+                    channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete();
+                } finally {
+                    channel.releaseRoutedDatagram(bytes);
+                }
             } else {
                 try {
-                    channel.eventLoop().execute(() -> channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete());
+                    channel.eventLoop().execute(() -> {
+                        try {
+                            channel.rakPipeline().fireChannelRead(buffer).fireChannelReadComplete();
+                        } finally {
+                            channel.releaseRoutedDatagram(bytes);
+                        }
+                    });
                 } catch (Throwable t) {
+                    channel.releaseRoutedDatagram(bytes);
                     buffer.release();
                     log.warn("Failed to route packet to child event loop for {}, closing child channel",
                             channel.remoteAddress(), t);

@@ -39,6 +39,8 @@ public class DefaultRakSessionConfig extends DefaultChannelConfig implements Rak
     private volatile boolean autoFlush = true;
     private volatile int flushInterval = 10;
     private volatile int maxQueuedBytes = 64 * 1024 * 1024; // 64 MB
+    private volatile int childInboundQueueLimit = 512;
+    private volatile int childInboundQueueBytes;
 
     public DefaultRakSessionConfig(Channel channel) {
         super(channel);
@@ -54,7 +56,8 @@ public class DefaultRakSessionConfig extends DefaultChannelConfig implements Rak
         return this.getOptions(
                 super.getOptions(),
                 RakChannelOption.RAK_GUID, RakChannelOption.RAK_MAX_CHANNELS, RakChannelOption.RAK_MTU, RakChannelOption.RAK_PROTOCOL_VERSION, RakChannelOption.RAK_ORDERING_CHANNELS,
-                RakChannelOption.RAK_METRICS, RakChannelOption.RAK_SESSION_TIMEOUT, RakChannelOption.RAK_AUTO_FLUSH, RakChannelOption.RAK_FLUSH_INTERVAL);
+                RakChannelOption.RAK_METRICS, RakChannelOption.RAK_SESSION_TIMEOUT, RakChannelOption.RAK_AUTO_FLUSH, RakChannelOption.RAK_FLUSH_INTERVAL,
+                RakChannelOption.RAK_MAX_QUEUED_BYTES, RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT, RakChannelOption.RAK_CHILD_INBOUND_QUEUE_BYTES);
     }
 
     @SuppressWarnings("unchecked")
@@ -87,6 +90,12 @@ public class DefaultRakSessionConfig extends DefaultChannelConfig implements Rak
         if (option == RakChannelOption.RAK_MAX_QUEUED_BYTES) {
             return (T) Integer.valueOf(this.getMaxQueuedBytes());
         }
+        if (option == RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT) {
+            return (T) Integer.valueOf(this.getChildInboundQueueLimit());
+        }
+        if (option == RakChannelOption.RAK_CHILD_INBOUND_QUEUE_BYTES) {
+            return (T) Integer.valueOf(this.getChildInboundQueueBytes());
+        }
         return this.channel.parent().config().getOption(option);
     }
 
@@ -113,6 +122,10 @@ public class DefaultRakSessionConfig extends DefaultChannelConfig implements Rak
             this.setFlushInterval((Integer) value);
         } else if (option == RakChannelOption.RAK_MAX_QUEUED_BYTES) {
             this.setMaxQueuedBytes((Integer) value);
+        } else if (option == RakChannelOption.RAK_CHILD_INBOUND_QUEUE_LIMIT) {
+            this.setChildInboundQueueLimit((Integer) value);
+        } else if (option == RakChannelOption.RAK_CHILD_INBOUND_QUEUE_BYTES) {
+            this.setChildInboundQueueBytes((Integer) value);
         } else {
             return this.channel.parent().config().setOption(option, value);
         }
@@ -214,5 +227,25 @@ public class DefaultRakSessionConfig extends DefaultChannelConfig implements Rak
     @Override
     public int getMaxQueuedBytes() {
         return maxQueuedBytes;
+    }
+
+    @Override
+    public void setChildInboundQueueLimit(int childInboundQueueLimit) {
+        this.childInboundQueueLimit = childInboundQueueLimit;
+    }
+
+    @Override
+    public int getChildInboundQueueLimit() {
+        return this.childInboundQueueLimit;
+    }
+
+    @Override
+    public void setChildInboundQueueBytes(int childInboundQueueBytes) {
+        this.childInboundQueueBytes = childInboundQueueBytes;
+    }
+
+    @Override
+    public int getChildInboundQueueBytes() {
+        return this.childInboundQueueBytes;
     }
 }
