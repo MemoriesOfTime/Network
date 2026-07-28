@@ -9,6 +9,7 @@ tmp/
 *.bak
 *.swp
 *~.nib
+.DS_Store
 local.properties
 .settings/
 .loadpath

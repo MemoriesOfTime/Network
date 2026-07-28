@@ -2,6 +2,7 @@ package org.cloudburstmc.netty.handler.codec.query;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.Unpooled;
 import lombok.Value;
 import lombok.experimental.NonFinal;
 
@@ -34,14 +35,21 @@ public interface QueryEventListener {
         @NonFinal
         private transient ByteBuf shortStats;
 
+        @Deprecated
         public ByteBuf getLongStats() {
-            if (longStats != null) {
-                return longStats;
-            }
+            ByteBuf buffer = Unpooled.buffer();
+            this.writeLongStats(buffer);
+            return buffer;
+        }
 
-            longStats = ByteBufAllocator.DEFAULT.buffer();
+        public ByteBuf getLongStats(ByteBufAllocator allocator) {
+            ByteBuf buffer = allocator.buffer();
+            this.writeLongStats(buffer);
+            return buffer;
+        }
 
-            longStats.writeBytes(QueryUtil.LONG_RESPONSE_PADDING_TOP);
+        private void writeLongStats(ByteBuf buffer) {
+            buffer.writeBytes(QueryUtil.LONG_RESPONSE_PADDING_TOP);
 
             StringJoiner plugins = new StringJoiner(";");
             if (this.plugins != null) {
@@ -64,39 +72,42 @@ public interface QueryEventListener {
             kvs.put("whitelist", whitelisted ? "on" : "off");
 
             kvs.forEach((key, value) -> {
-                QueryUtil.writeNullTerminatedString(longStats, key);
-                QueryUtil.writeNullTerminatedString(longStats, value);
+                QueryUtil.writeNullTerminatedString(buffer, key);
+                QueryUtil.writeNullTerminatedString(buffer, value);
             });
 
-            longStats.writeByte(0);
-            longStats.writeBytes(QueryUtil.LONG_RESPONSE_PADDING_BOTTOM);
+            buffer.writeByte(0);
+            buffer.writeBytes(QueryUtil.LONG_RESPONSE_PADDING_BOTTOM);
 
             if (players != null) {
                 for (String player : players) {
-                    QueryUtil.writeNullTerminatedString(longStats, player);
+                    QueryUtil.writeNullTerminatedString(buffer, player);
                 }
             }
-            longStats.writeByte(0);
-
-            return longStats;
+            buffer.writeByte(0);
         }
 
+        @Deprecated
         public ByteBuf getShortStats() {
-            if (shortStats != null) {
-                return shortStats;
-            }
+            ByteBuf buffer = Unpooled.buffer();
+            this.writeShortStats(buffer);
+            return buffer;
+        }
 
-            shortStats = ByteBufAllocator.DEFAULT.buffer();
+        public ByteBuf getShortStats(ByteBufAllocator allocator) {
+            ByteBuf buffer = allocator.buffer();
+            this.writeShortStats(buffer);
+            return buffer;
+        }
 
-            QueryUtil.writeNullTerminatedString(shortStats, hostname);
-            QueryUtil.writeNullTerminatedString(shortStats, gametype);
-            QueryUtil.writeNullTerminatedString(shortStats, map);
-            QueryUtil.writeNullTerminatedString(shortStats, Integer.toString(playerCount));
-            QueryUtil.writeNullTerminatedString(shortStats, Integer.toString(maxPlayerCount));
-            shortStats.writeShortLE(hostport);
-            QueryUtil.writeNullTerminatedString(shortStats, hostip);
-
-            return shortStats;
+        private void writeShortStats(ByteBuf buffer) {
+            QueryUtil.writeNullTerminatedString(buffer, hostname);
+            QueryUtil.writeNullTerminatedString(buffer, gametype);
+            QueryUtil.writeNullTerminatedString(buffer, map);
+            QueryUtil.writeNullTerminatedString(buffer, Integer.toString(playerCount));
+            QueryUtil.writeNullTerminatedString(buffer, Integer.toString(maxPlayerCount));
+            buffer.writeShortLE(hostport);
+            QueryUtil.writeNullTerminatedString(buffer, hostip);
         }
     }
 }

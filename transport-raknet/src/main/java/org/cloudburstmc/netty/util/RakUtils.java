@@ -19,51 +19,22 @@ package org.cloudburstmc.netty.util;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelPipeline;
-import io.netty.channel.DefaultChannelPipeline;
 import io.netty.channel.socket.DatagramPacket;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.net.*;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Queue;
 
 public class RakUtils {
 
-    private static final Constructor<DefaultChannelPipeline> DEFAULT_CHANNEL_PIPELINE_CONSTRUCTOR;
-    private static final Method PIPELINE_DESTROY_METHOD;
-
-    static {
-        try {
-            Constructor<DefaultChannelPipeline> constructor = DefaultChannelPipeline.class.getDeclaredConstructor(Channel.class);
-            constructor.setAccessible(true);
-            DEFAULT_CHANNEL_PIPELINE_CONSTRUCTOR = constructor;
-        } catch (NoSuchMethodException e) {
-            throw new AssertionError("Unable to find DefaultChannelPipeline(Channel) constructor", e);
-        }
-
-        try {
-            Method method = DefaultChannelPipeline.class.getDeclaredMethod("destroy");
-            method.setAccessible(true);
-            PIPELINE_DESTROY_METHOD = method;
-        } catch (NoSuchMethodException e) {
-            throw new AssertionError("Unable to find DefaultChannelPipeline.destroy() method", e);
-        }
-    }
-
-    public static DefaultChannelPipeline newChannelPipeline(Channel channel) {
-        try {
-            return DEFAULT_CHANNEL_PIPELINE_CONSTRUCTOR.newInstance(channel);
-        } catch (InvocationTargetException | InstantiationException | IllegalAccessException e) {
-            throw new IllegalStateException("Unable to instantiate DefaultChannelPipeline", e);
-        }
-    }
-
     public static void destroyChannelPipeline(ChannelPipeline pipeline) {
-        try {
-            PIPELINE_DESTROY_METHOD.invoke(pipeline);
-        } catch (IllegalAccessException | InvocationTargetException e) {
-            throw new IllegalStateException("Unable to destroy DefaultChannelPipeline", e);
+        List<String> names = new ArrayList<>(pipeline.names());
+        for (int i = names.size() - 1; i >= 0; i--) {
+            String name = names.get(i);
+            if (pipeline.get(name) != null) {
+                pipeline.remove(name);
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 package org.cloudburstmc.netty.handler.codec.query.handler;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.cloudburstmc.netty.handler.codec.query.QueryEventListener;
@@ -42,12 +43,18 @@ public class QueryPacketHandler extends SimpleChannelInboundHandler<DirectAddres
 
             QueryEventListener.Data data = listener.onQuery(packet.sender());
 
-            if (statistics.isFull()) {
-                statistics.setPayload(data.getLongStats());
-            } else {
-                statistics.setPayload(data.getShortStats());
+            ByteBuf payload = statistics.isFull() ? data.getLongStats(ctx.alloc()) : data.getShortStats(ctx.alloc());
+            boolean submitted = false;
+            try {
+                statistics.setPayload(payload);
+                ctx.writeAndFlush(new DirectAddressedQueryPacket(statistics, packet.sender(), packet.recipient()))
+                        .addListener(future -> payload.release());
+                submitted = true;
+            } finally {
+                if (!submitted) {
+                    payload.release();
+                }
             }
-            ctx.writeAndFlush(new DirectAddressedQueryPacket(statistics, packet.sender(), packet.recipient()), ctx.voidPromise());
         }
     }
 

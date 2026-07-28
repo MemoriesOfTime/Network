@@ -21,7 +21,7 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import org.cloudburstmc.netty.channel.raknet.RakChannelFactory;
@@ -60,7 +60,7 @@ public class RakCookieTests {
 
     @BeforeEach
     public void setup() {
-        group = new NioEventLoopGroup();
+        group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         acceptedChannels = new LinkedBlockingQueue<>();
         serverExceptions = new LinkedBlockingQueue<>();
     }

@@ -22,9 +22,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.*;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.util.ReferenceCountUtil;
@@ -124,9 +123,9 @@ public class RakTests {
 
     @BeforeEach
     public void setup() {
-        this.serverParentGroup = new NioEventLoopGroup(1);
-        this.serverChildGroup = new NioEventLoopGroup(1);
-        this.clientGroup = new NioEventLoopGroup(1);
+        this.serverParentGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        this.serverChildGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        this.clientGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
     }
 
     @AfterEach
@@ -429,7 +428,7 @@ public class RakTests {
         InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
         InetSocketAddress localAddress = new InetSocketAddress("127.0.0.1", 19132);
         RakChildChannel child = newChildChannel(server, remoteAddress, localAddress);
-        EventLoopGroup rejectingGroup = new DefaultEventLoopGroup(1);
+        EventLoopGroup rejectingGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         ByteBuf payload = Unpooled.buffer(1).writeByte(1);
         EmbeddedChannel routeChannel = new EmbeddedChannel(new org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRouteHandler(server));
 
@@ -571,7 +570,7 @@ public class RakTests {
                 server,
                 new InetSocketAddress("127.0.0.1", 30000),
                 new InetSocketAddress("127.0.0.1", 19132));
-        EventLoopGroup rejectingGroup = new DefaultEventLoopGroup(1);
+        EventLoopGroup rejectingGroup = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
         ByteBuf message = Unpooled.buffer(1).writeByte(1);
         Method onUnhandledInboundMessage = child.rakPipeline().getClass()
                 .getDeclaredMethod("onUnhandledInboundMessage", ChannelHandlerContext.class, Object.class);

@@ -1,7 +1,6 @@
 package org.cloudburstmc.netty.handler.codec.query.codec;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.MessageToMessageCodec;
@@ -21,7 +20,7 @@ public class QueryPacketCodec extends MessageToMessageCodec<DatagramPacket, Dire
     @Override
     protected void encode(ChannelHandlerContext channelHandlerContext, DirectAddressedQueryPacket packet, List<Object> list) throws Exception {
         try {
-            ByteBuf buf = ByteBufAllocator.DEFAULT.ioBuffer();
+            ByteBuf buf = channelHandlerContext.alloc().ioBuffer();
             buf.writeByte(packet.content().getId() & 0xFF);
             packet.content().encode(buf);
             list.add(new DatagramPacket(buf, packet.recipient(), packet.sender()));

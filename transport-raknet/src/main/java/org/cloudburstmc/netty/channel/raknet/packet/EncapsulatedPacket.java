@@ -20,16 +20,21 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufUtil;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.util.AbstractReferenceCounted;
-import io.netty.util.internal.ObjectPool;
+import io.netty.util.Recycler;
 import io.netty.util.ReferenceCountUtil;
 import org.cloudburstmc.netty.channel.raknet.RakConstants;
 import org.cloudburstmc.netty.channel.raknet.RakReliability;
 
 public class EncapsulatedPacket extends AbstractReferenceCounted {
 
-    private static final ObjectPool<EncapsulatedPacket> RECYCLER = ObjectPool.newPool(EncapsulatedPacket::new);
+    private static final Recycler<EncapsulatedPacket> RECYCLER = new Recycler<>() {
+        @Override
+        protected EncapsulatedPacket newObject(Handle<EncapsulatedPacket> handle) {
+            return new EncapsulatedPacket(handle);
+        }
+    };
 
-    private final ObjectPool.Handle<EncapsulatedPacket> handle;
+    private final Recycler.Handle<EncapsulatedPacket> handle;
     private RakReliability reliability;
     private int reliabilityIndex;
     private int sequenceIndex;
@@ -46,7 +51,7 @@ public class EncapsulatedPacket extends AbstractReferenceCounted {
         return RECYCLER.get();
     }
 
-    private EncapsulatedPacket(ObjectPool.Handle<EncapsulatedPacket> handle) {
+    private EncapsulatedPacket(Recycler.Handle<EncapsulatedPacket> handle) {
         this.handle = handle;
     }
 

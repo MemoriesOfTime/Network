@@ -176,9 +176,14 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     }
 
     @Override
-    protected void doRegister() throws Exception {
-        this.rakPipeline.fireChannelRegistered();
-        this.rakPipeline.fireChannelActive();
+    protected void doRegister(ChannelPromise promise) {
+        try {
+            this.rakPipeline.fireChannelRegistered();
+            this.rakPipeline.fireChannelActive();
+            promise.setSuccess();
+        } catch (Throwable t) {
+            promise.setFailure(t);
+        }
     }
 
     @Override

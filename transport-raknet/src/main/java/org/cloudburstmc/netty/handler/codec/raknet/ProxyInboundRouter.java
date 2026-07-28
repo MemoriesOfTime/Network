@@ -17,12 +17,12 @@
 package org.cloudburstmc.netty.handler.codec.raknet;
 
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandler;
+import io.netty.channel.ChannelInboundHandlerAdapter;
 import org.cloudburstmc.netty.channel.proxy.ProxyChannel;
 
 import java.nio.channels.ClosedChannelException;
 
-public class ProxyInboundRouter implements ChannelInboundHandler {
+public class ProxyInboundRouter extends ChannelInboundHandlerAdapter {
 
     public static final String NAME = "rak-proxy-inbound-router";
     private final ProxyChannel<?> proxiedChannel;

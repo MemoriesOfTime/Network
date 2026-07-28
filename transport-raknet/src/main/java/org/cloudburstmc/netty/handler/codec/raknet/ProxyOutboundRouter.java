@@ -17,14 +17,14 @@
 package org.cloudburstmc.netty.handler.codec.raknet;
 
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelOutboundHandler;
+import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelPromise;
 import org.cloudburstmc.netty.channel.proxy.ProxyChannel;
 
 import java.net.PortUnreachableException;
 import java.net.SocketAddress;
 
-public class ProxyOutboundRouter implements ChannelOutboundHandler {
+public class ProxyOutboundRouter extends ChannelDuplexHandler {
 
     public static final String NAME = "rak-proxy-outbound-router";
     private final ProxyChannel<?> proxiedChannel;
