@@ -153,7 +153,7 @@ public class RakServerOfflineHandler extends AdvancedChannelInboundHandler<Datag
 
         boolean handlePing = ((RakServerChannelConfig) ctx.channel().config()).getHandlePing();
         if (handlePing) {
-            ctx.fireChannelRead(new RakPing(pingTime, packet.sender()));
+            ctx.fireChannelRead(new RakPing(pingTime, packet.sender(), packet.recipient()));
             return;
         }
 

@@ -85,8 +85,12 @@ public class RakThrottleTests {
     public void testConnectsMax() {
         setupServer();
 
+        // Since transient denials (e.g. rate limiting) are now retried by the client (#75),
+        // limit the client to a single connection attempt so that a denied client fails
+        // immediately instead of staying active through retries.
         for (int i = 0; i < 2; i++) {
             Channel client = clientBootstrap()
+                    .option(RakChannelOption.RAK_MAX_CONNECTION_ATTEMPTS, 1)
                     .connect(new InetSocketAddress("127.0.0.1", PORT))
                     .awaitUninterruptibly()
                     .channel();
@@ -100,6 +104,7 @@ public class RakThrottleTests {
 
         for (int i = 0; i < 2; i++) {
             Channel client = clientBootstrap()
+                    .option(RakChannelOption.RAK_MAX_CONNECTION_ATTEMPTS, 1)
                     .connect(new InetSocketAddress("127.0.0.1", PORT))
                     .awaitUninterruptibly()
                     .channel();
