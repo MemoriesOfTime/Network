@@ -404,16 +404,26 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     private EncapsulatedPacket getReassembledPacket(EncapsulatedPacket splitPacket, ByteBufAllocator alloc) {
         this.checkForClosed();
 
-        SplitPacketHelper helper = this.splitPackets.get(splitPacket.getPartId());
+        int partId = splitPacket.getPartId();
+        SplitPacketHelper helper = this.splitPackets.get(partId);
+        if (helper != null && !helper.matches(splitPacket)) {
+            // Part IDs are only unique modulo the size of this array, so an unrelated split packet may
+            // hold the slot. Drop the part rather than corrupt a reassembly that is still in progress.
+            if (!helper.expired()) {
+                return null;
+            }
+            helper = null; // Released below when set() overwrites it.
+        }
+
         if (helper == null) {
-            this.splitPackets.set(splitPacket.getPartId(), helper = new SplitPacketHelper(splitPacket.getPartCount()));
+            this.splitPackets.set(partId, helper = new SplitPacketHelper(partId, splitPacket.getPartCount()));
         }
 
         // Try reassembling the packet.
         EncapsulatedPacket result = helper.add(splitPacket, alloc);
         if (result != null) {
             // Packet reassembled. Remove the helper
-            this.splitPackets.remove(splitPacket.getPartId(), helper);
+            this.splitPackets.remove(partId, helper);
         }
 
         return result;
