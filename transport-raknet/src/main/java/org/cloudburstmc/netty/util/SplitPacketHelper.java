@@ -28,17 +28,26 @@ import java.util.Objects;
 
 public class SplitPacketHelper extends AbstractReferenceCounted {
     private final EncapsulatedPacket[] packets;
+    private final int partId;
     private final long created = System.currentTimeMillis();
     private int reassembledSize;
 
-    public SplitPacketHelper(long expectedLength) {
+    public SplitPacketHelper(int partId, long expectedLength) {
         if (expectedLength < 2) {
             throw new IllegalArgumentException("expectedLength must be greater than 1");
         }
         if (expectedLength > 8192) {
             throw new IllegalArgumentException("Too many split parts, expectedLength must be less than 8192");
         }
+        this.partId = partId;
         this.packets = new EncapsulatedPacket[(int) expectedLength];
+    }
+
+    /**
+     * Whether this helper is reassembling the split packet the given part was cut from.
+     */
+    public boolean matches(EncapsulatedPacket packet) {
+        return this.partId == packet.getPartId() && this.packets.length == packet.getPartCount();
     }
 
     public EncapsulatedPacket add(EncapsulatedPacket packet, ByteBufAllocator alloc) {
