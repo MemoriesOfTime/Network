@@ -30,6 +30,7 @@ public class SplitPacketHelper extends AbstractReferenceCounted {
     private final EncapsulatedPacket[] packets;
     private final int partId;
     private final long created = System.currentTimeMillis();
+    private int reassembledSize;
 
     public SplitPacketHelper(int partId, long expectedLength) {
         if (expectedLength < 2) {
@@ -65,6 +66,7 @@ public class SplitPacketHelper extends AbstractReferenceCounted {
         }
         // Retain the packet so it can be reassembled later.
         this.packets[partIndex] = packet.retain();
+        this.reassembledSize += packet.getBuffer().readableBytes();
 
         int sz = 0;
         for (EncapsulatedPacket netPacket : this.packets) {
@@ -82,6 +84,13 @@ public class SplitPacketHelper extends AbstractReferenceCounted {
         }
 
         return packet.fromSplit(reassembled);
+    }
+
+    /**
+     * The number of payload bytes currently retained by this reassembly across all received parts.
+     */
+    public int getReassembledSize() {
+        return this.reassembledSize;
     }
 
     public boolean expired() {
