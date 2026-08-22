@@ -63,4 +63,12 @@ public interface RakChannelConfig extends ChannelConfig {
     void setChildInboundQueueBytes(int childInboundQueueBytes);
 
     int getChildInboundQueueBytes();
+
+    void setMaxSplitQueuedBytes(int maxSplitQueuedBytes);
+
+    int getMaxSplitQueuedBytes();
+
+    void setMaxOrderingQueuedBytes(int maxOrderingQueuedBytes);
+
+    int getMaxOrderingQueuedBytes();
 }
