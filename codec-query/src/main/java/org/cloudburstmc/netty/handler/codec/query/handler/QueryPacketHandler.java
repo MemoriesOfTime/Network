@@ -3,6 +3,7 @@ package org.cloudburstmc.netty.handler.codec.query.handler;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.util.concurrent.ScheduledFuture;
 import org.cloudburstmc.netty.handler.codec.query.QueryEventListener;
 import org.cloudburstmc.netty.handler.codec.query.enveloped.DirectAddressedQueryPacket;
 import org.cloudburstmc.netty.handler.codec.query.packet.HandshakePacket;
@@ -13,20 +14,38 @@ import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
-import java.util.Timer;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 
 public class QueryPacketHandler extends SimpleChannelInboundHandler<DirectAddressedQueryPacket> {
+    private static final int TOKEN_ROTATION_SECONDS = 30;
+
     private final QueryEventListener listener;
-    private final Timer timer;
     private byte[] lastToken;
     private byte[] token = new byte[16];
+    private ScheduledFuture<?> tokenRotationFuture;
 
     public QueryPacketHandler(QueryEventListener listener) {
         this.listener = listener;
-        this.timer = new Timer("QueryRegenerationTicker");
     }
 
+    @Override
+    public void channelActive(ChannelHandlerContext ctx) throws Exception {
+        // The all-zero default key must never sign tokens, so randomize it before the channel serves queries.
+        ThreadLocalRandom.current().nextBytes(this.token);
+        this.tokenRotationFuture = ctx.channel().eventLoop().scheduleAtFixedRate(
+                this::refreshToken, TOKEN_ROTATION_SECONDS, TOKEN_ROTATION_SECONDS, TimeUnit.SECONDS);
+        super.channelActive(ctx);
+    }
+
+    @Override
+    public void channelInactive(ChannelHandlerContext ctx) throws Exception {
+        if (this.tokenRotationFuture != null) {
+            this.tokenRotationFuture.cancel(false);
+            this.tokenRotationFuture = null;
+        }
+        super.channelInactive(ctx);
+    }
 
     @Override
     protected void channelRead0(ChannelHandlerContext ctx, DirectAddressedQueryPacket packet) throws Exception {
@@ -37,7 +56,7 @@ public class QueryPacketHandler extends SimpleChannelInboundHandler<DirectAddres
         }
         if (packet.content() instanceof StatisticsPacket) {
             StatisticsPacket statistics = (StatisticsPacket) packet.content();
-            if (!(statistics.getToken() == getTokenInt(packet.sender()))) {
+            if (!this.isValidToken(statistics.getToken(), packet.sender())) {
                 return;
             }
 
@@ -59,8 +78,10 @@ public class QueryPacketHandler extends SimpleChannelInboundHandler<DirectAddres
     }
 
     public void refreshToken() {
-        lastToken = token;
-        ThreadLocalRandom.current().nextBytes(token);
+        this.lastToken = this.token;
+        // A fresh array is required: refilling the old one in place would alias lastToken to token.
+        this.token = new byte[16];
+        ThreadLocalRandom.current().nextBytes(this.token);
     }
 
     private String getTokenString(InetSocketAddress socketAddress) {
@@ -69,18 +90,27 @@ public class QueryPacketHandler extends SimpleChannelInboundHandler<DirectAddres
     }
 
     private int getTokenInt(InetSocketAddress socketAddress) {
-        return ByteBuffer.wrap(getToken(socketAddress)).getInt();
+        return ByteBuffer.wrap(getToken(socketAddress, token)).getInt();
     }
 
-    private byte[] getToken(InetSocketAddress socketAddress) {
+    private boolean isValidToken(int challengeToken, InetSocketAddress socketAddress) {
+        if (challengeToken == this.getTokenInt(socketAddress)) {
+            return true;
+        }
+        // Tokens handed out before the latest rotation stay valid until the next one.
+        return this.lastToken != null
+                && challengeToken == ByteBuffer.wrap(this.getToken(socketAddress, this.lastToken)).getInt();
+    }
+
+    private byte[] getToken(InetSocketAddress socketAddress, byte[] secret) {
         MessageDigest digest;
         try {
-            digest = MessageDigest.getInstance("MD5");
+            digest = MessageDigest.getInstance("SHA-256");
         } catch (NoSuchAlgorithmException var3) {
-            throw new InternalError("MD5 not supported", var3);
+            throw new InternalError("SHA-256 not supported", var3);
         }
         digest.update(socketAddress.toString().getBytes());
-        byte[] digested = digest.digest(token);
+        byte[] digested = digest.digest(secret);
         return Arrays.copyOf(digested, 4);
     }
 }
