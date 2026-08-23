@@ -20,6 +20,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.DatagramPacket;
 import org.cloudburstmc.netty.channel.raknet.RakClientChannel;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelMetrics;
@@ -66,12 +67,33 @@ public class RakClientProxyRouteHandler extends ChannelDuplexHandler {
             return;
         }
 
-        DatagramPacket datagram = isDatagram ? (DatagramPacket) msg : new DatagramPacket((ByteBuf) msg, this.channel.remoteAddress());
-        RakChannelMetrics metrics = this.channel.config().getMetrics();
-        if (metrics != null) {
-            metrics.bytesOut(datagram.content().readableBytes());
+        // kqueue/epoll send addressed packets via sendto(), which macOS rejects with
+        // EISCONN on connected sockets. Send the buffer unwrapped so it goes through
+        // write() and is delivered to the connected peer on every platform.
+        if (((DatagramChannel) ctx.channel()).isConnected()) {
+            if (!isDatagram) {
+                this.recordBytesOut((ByteBuf) msg);
+                ctx.write(msg, promise);
+                return;
+            }
+            DatagramPacket packet = (DatagramPacket) msg;
+            if (packet.recipient() == null || packet.recipient().equals(this.channel.remoteAddress())) {
+                this.recordBytesOut(packet.content());
+                ctx.write(packet.content().retain(), promise);
+                packet.release();
+                return;
+            }
         }
 
+        DatagramPacket datagram = isDatagram ? (DatagramPacket) msg : new DatagramPacket((ByteBuf) msg, this.channel.remoteAddress());
+        this.recordBytesOut(datagram.content());
         ctx.write(datagram, promise);
+    }
+
+    private void recordBytesOut(ByteBuf content) {
+        RakChannelMetrics metrics = this.channel.config().getMetrics();
+        if (metrics != null) {
+            metrics.bytesOut(content.readableBytes());
+        }
     }
 }
