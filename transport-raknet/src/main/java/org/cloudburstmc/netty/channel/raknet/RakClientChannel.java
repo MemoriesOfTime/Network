@@ -26,6 +26,7 @@ import org.cloudburstmc.netty.channel.proxy.ProxyChannel;
 import org.cloudburstmc.netty.channel.raknet.config.DefaultRakClientConfig;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelConfig;
 import org.cloudburstmc.netty.handler.codec.raknet.ProxyInboundRouter;
+import org.cloudburstmc.netty.handler.codec.raknet.client.RakClientConnectedWriteHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.client.RakClientProxyRouteHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.client.RakClientRouteHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.common.*;
@@ -48,6 +49,9 @@ public class RakClientChannel extends ProxyChannel<DatagramChannel> implements R
         this.pipeline().addLast(RakClientRouteHandler.NAME, new RakClientRouteHandler(this));
         // Transforms DatagramPacket to ByteBuf if channel has been already connected
         this.rakPipeline().addFirst(RakClientProxyRouteHandler.NAME, new RakClientProxyRouteHandler(this));
+        // Unwraps DatagramPackets addressed to the connected peer, but only after
+        // user handlers (e.g. PROXY prependers) have seen them
+        this.rakPipeline().addFirst(RakClientConnectedWriteHandler.NAME, new RakClientConnectedWriteHandler());
         // Encodes to buffer and sends RakPing.
         this.rakPipeline().addBefore(ProxyInboundRouter.NAME, UnconnectedPingEncoder.NAME, new UnconnectedPingEncoder(this));
         // Decodes received unconnected pong to RakPong.
