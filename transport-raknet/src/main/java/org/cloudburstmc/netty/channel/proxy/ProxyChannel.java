@@ -26,6 +26,7 @@ import org.cloudburstmc.netty.handler.codec.raknet.ProxyOutboundRouter;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
 import java.util.Objects;
+import java.util.concurrent.RejectedExecutionException;
 
 public abstract class ProxyChannel<T extends Channel> implements Channel {
 
@@ -169,7 +170,7 @@ public abstract class ProxyChannel<T extends Channel> implements Channel {
 
     @Override
     public ChannelFuture disconnect() {
-        return this.pipeline.disconnect();
+        return this.disconnect(this.newPromise());
     }
 
     @Override
@@ -199,7 +200,26 @@ public abstract class ProxyChannel<T extends Channel> implements Channel {
 
     @Override
     public ChannelFuture disconnect(ChannelPromise promise) {
-        return this.pipeline.disconnect(promise);
+        EventLoop eventLoop = this.eventLoop();
+        if (eventLoop.inEventLoop()) {
+            this.disconnect0(promise);
+        } else {
+            try {
+                eventLoop.execute(() -> this.disconnect0(promise));
+            } catch (RejectedExecutionException e) {
+                promise.tryFailure(e);
+            }
+        }
+        return promise;
+    }
+
+    private void disconnect0(ChannelPromise promise) {
+        // Netty disconnects without checking the socket is open, and a closed parent's fd may belong to another socket by now
+        if (this.isOpen()) {
+            this.pipeline.disconnect(promise);
+        } else {
+            promise.trySuccess();
+        }
     }
 
     @Override
