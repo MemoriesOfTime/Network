@@ -35,7 +35,6 @@ subprojects {
     }
 
     repositories {
-        mavenLocal()
         mavenCentral()
         maven {
             name = "opencollab-releases"
