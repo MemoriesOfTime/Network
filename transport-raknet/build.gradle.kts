@@ -20,6 +20,7 @@ description = "RakNet transport for Netty"
 
 dependencies {
     api(platform(libs.netty.bom))
+    api(project(":transport-common"))
     api(libs.bundles.netty)
     api(libs.netty.codec.haproxy)
     api(libs.expiringmap)

@@ -25,6 +25,7 @@ import io.netty.util.collection.IntObjectMap;
 import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
+import org.cloudburstmc.netty.channel.TransportDisconnectReason;
 import org.cloudburstmc.netty.channel.raknet.*;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelMetrics;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
@@ -37,8 +38,12 @@ import java.net.Inet6Address;
 import java.net.InetSocketAddress;
 import java.util.ArrayDeque;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.NavigableMap;
 import java.util.Queue;
+import java.util.TreeMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
@@ -50,8 +55,11 @@ import static org.cloudburstmc.netty.channel.raknet.RakConstants.*;
 public class RakSessionCodec extends ChannelDuplexHandler {
     private static final InternalLogger log = InternalLoggerFactory.getInstance(RakSessionCodec.class);
     public static final String NAME = "rak-session-codec";
-    private static final int MAX_RELIABLE_DATAGRAM_GAP = 4096;
-    private static final int MAX_ORDERING_INDEX_GAP = 4096;
+    // How far reliable and ordering indices may run ahead of the read index: the Bedrock client's reliable limit.
+    private static final int MAX_RECEIVE_GAP = 32768;
+    // Charged per queued ordered message on top of its payload.
+    private static final int ORDERING_ENTRY_OVERHEAD = 2048;
+    // Defensive caps on top of the byte budgets, kept from the fork's malformed-packet hardening.
     private static final int MAX_ORDERING_HEAP_SIZE = 4096;
     private static final int MAX_SPLIT_PACKET_COUNT = 64;
 
@@ -75,6 +83,11 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
     private RoundRobinArray<SplitPacketHelper> splitPackets;
     private BitQueue reliableDatagramQueue;
+    // Sent reliable messages from reliableWindowStart on, true until acknowledged
+    private BitQueue reliableWindow;
+    private int reliableWindowStart;
+    // Unacknowledged part counts of reliable split messages in flight, by split ID
+    private IntObjectMap<int[]> splitsInFlight;
 
     private FastBinaryMinHeap<EncapsulatedPacket> outgoingPackets;
     private long[] outgoingPacketNextWeights;
@@ -82,7 +95,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     private long currentPingTime = -1;
     private long lastPingTime = -1;
     private long lastPongTime = -1;
-    private IntObjectMap<RakDatagramPacket> sentDatagrams;
+    private NavigableMap<Integer, RakDatagramPacket> sentDatagrams;
     private Queue<IntRange> incomingAcks;
     private Queue<IntRange> incomingNaks;
     private Queue<IntRange> outgoingAcks;
@@ -121,7 +134,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         }
 
         this.outgoingPackets = new FastBinaryMinHeap<>(8);
-        this.sentDatagrams = new IntObjectHashMap<>();
+        this.sentDatagrams = new TreeMap<>();
 
         this.incomingAcks = new ArrayDeque<>();
         this.incomingNaks = new ArrayDeque<>();
@@ -129,6 +142,8 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         this.outgoingNaks = new ArrayDeque<>();
 
         this.reliableDatagramQueue = new BitQueue(512);
+        this.reliableWindow = new BitQueue(RELIABLE_WINDOW_SIZE * 2);
+        this.splitsInFlight = new IntObjectHashMap<>();
         this.splitPackets = new RoundRobinArray<>(256);
 
         // After session is fully initialized, start ticking.
@@ -252,7 +267,12 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
     @Override
     public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
-        this.disconnect0(RakDisconnectReason.DISCONNECTED).addListener(future -> {
+        ChannelFuture disconnectFuture = this.disconnect0(TransportDisconnectReason.DISCONNECTED, false);
+        if (disconnectFuture.isVoid()) {
+            // Already disconnecting or closed, so complete once the close lands
+            disconnectFuture = this.channel.closeFuture();
+        }
+        disconnectFuture.addListener(future -> {
             if (future.cause() == null) {
                 promise.trySuccess();
             } else {
@@ -270,11 +290,11 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             throw new IllegalArgumentException();
         }
 
+        EncapsulatedPacket[] packets = this.createEncapsulated(message);
         RakChannelMetrics metrics = this.getMetrics();
         if (metrics != null) {
             metrics.encapsulatedOut(1);
         }
-        EncapsulatedPacket[] packets = this.createEncapsulated(message);
         if (message.priority() == RakPriority.IMMEDIATE) {
             this.sendImmediate(ctx, packets);
             return;
@@ -316,11 +336,10 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         for (final EncapsulatedPacket encapsulated : packet.getPackets()) {
             if (encapsulated.getReliability().isReliable()) {
                 int missed = encapsulated.getReliabilityIndex() - this.reliabilityReadIndex;
-                if (missed > MAX_RELIABLE_DATAGRAM_GAP) {
-                    this.close(RakDisconnectReason.BAD_PACKET);
+                if (missed >= MAX_RECEIVE_GAP) {
+                    this.close(TransportDisconnectReason.BAD_PACKET);
                     return;
-                }
-                if (missed > 0) {
+                } else if (missed > 0) {
                     if (missed < this.reliableDatagramQueue.size()) {
                         if (this.reliableDatagramQueue.get(missed)) {
                             this.reliableDatagramQueue.set(missed, false);
@@ -388,12 +407,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         if (packet.getReliability().isOrdered()) {
             int orderingChannel = packet.getOrderingChannel();
             if (orderingChannel < 0 || orderingChannel >= this.orderingHeaps.length) {
-                this.close(RakDisconnectReason.BAD_PACKET);
-                return;
-            }
-            int missed = packet.getOrderingIndex() - this.orderReadIndex[orderingChannel];
-            if (missed > MAX_ORDERING_INDEX_GAP) {
-                this.close(RakDisconnectReason.BAD_PACKET);
+                this.close(TransportDisconnectReason.BAD_PACKET);
                 return;
             }
             this.onOrderedReceived(ctx, packet);
@@ -405,16 +419,20 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     private void onOrderedReceived(ChannelHandlerContext ctx, EncapsulatedPacket packet) {
         int orderingChannel = packet.getOrderingChannel();
         FastBinaryMinHeap<EncapsulatedPacket> binaryHeap = this.orderingHeaps[orderingChannel];
-        if (this.orderReadIndex[orderingChannel] < packet.getOrderingIndex()) {
+        int distance = packet.getOrderingIndex() - this.orderReadIndex[orderingChannel];
+        if (distance >= MAX_RECEIVE_GAP) {
+            this.close(TransportDisconnectReason.BAD_PACKET);
+            return;
+        } else if (distance > 0) {
             // Not next in line so add to queue.
             if (binaryHeap.size() >= MAX_ORDERING_HEAP_SIZE) {
-                this.close(RakDisconnectReason.BAD_PACKET);
+                this.close(TransportDisconnectReason.BAD_PACKET);
                 return;
             }
             binaryHeap.insert(packet.getOrderingIndex(), packet.retain());
-            this.orderingQueuedBytes += packet.getBuffer().readableBytes();
+            this.orderingQueuedBytes += packet.getBuffer().readableBytes() + ORDERING_ENTRY_OVERHEAD;
             return;
-        } else if (this.orderReadIndex[orderingChannel] > packet.getOrderingIndex()) {
+        } else if (distance < 0) {
             // We already have this
             return;
         }
@@ -429,7 +447,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 try {
                     // We got the expected packet
                     binaryHeap.remove();
-                    this.orderingQueuedBytes -= queuedPacket.getBuffer().readableBytes();
+                    this.orderingQueuedBytes -= queuedPacket.getBuffer().readableBytes() + ORDERING_ENTRY_OVERHEAD;
                     this.orderReadIndex[orderingChannel]++;
                     ctx.fireChannelRead(queuedPacket.retain());
                 } finally {
@@ -461,13 +479,13 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         if (helper == null) {
             if (this.splitPacketCount >= MAX_SPLIT_PACKET_COUNT) {
-                this.close(RakDisconnectReason.BAD_PACKET);
+                this.close(TransportDisconnectReason.BAD_PACKET);
                 return null;
             }
             try {
                 helper = new SplitPacketHelper(partId, splitPacket.getPartCount());
             } catch (IllegalArgumentException e) {
-                this.close(RakDisconnectReason.BAD_PACKET);
+                this.close(TransportDisconnectReason.BAD_PACKET);
                 return null;
             }
             this.splitPackets.set(partId, helper);
@@ -483,7 +501,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             this.splitPackets.remove(partId, helper);
             this.splitPacketCount = Math.max(0, this.splitPacketCount - 1);
             this.splitQueuedBytes -= helper.getReassembledSize();
-            this.close(RakDisconnectReason.BAD_PACKET);
+            this.close(TransportDisconnectReason.BAD_PACKET);
             return null;
         }
         this.splitQueuedBytes += helper.getReassembledSize() - sizeBefore;
@@ -532,7 +550,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         int maxQueuedBytes = this.channel.config().getOption(RakChannelOption.RAK_MAX_QUEUED_BYTES);
 
         if (maxQueuedBytes > 0 && this.queuedBytes > maxQueuedBytes) {
-            this.disconnect(RakDisconnectReason.QUEUE_TOO_LONG);
+            this.disconnect(TransportDisconnectReason.QUEUE_TOO_LONG);
             return;
         }
 
@@ -542,13 +560,13 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         int maxSplitQueuedBytes = this.channel.config().getOption(RakChannelOption.RAK_MAX_SPLIT_QUEUED_BYTES);
         if (maxSplitQueuedBytes > 0 && this.splitQueuedBytes > maxSplitQueuedBytes) {
-            this.disconnect(RakDisconnectReason.SPLIT_QUEUE_TOO_LONG);
+            this.disconnect(TransportDisconnectReason.SPLIT_QUEUE_TOO_LONG);
             return;
         }
 
         int maxOrderingQueuedBytes = this.channel.config().getOption(RakChannelOption.RAK_MAX_ORDERING_QUEUED_BYTES);
         if (maxOrderingQueuedBytes > 0 && this.orderingQueuedBytes > maxOrderingQueuedBytes) {
-            this.disconnect(RakDisconnectReason.ORDERING_QUEUE_TOO_LONG);
+            this.disconnect(TransportDisconnectReason.ORDERING_QUEUE_TOO_LONG);
             return;
         }
 
@@ -559,13 +577,13 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         if (this.state == RakState.UNCONNECTED) {
             if (this.isTimedOut(curTime)) {
-                this.close(RakDisconnectReason.TIMED_OUT);
+                this.close(TransportDisconnectReason.TIMED_OUT);
             }
             return;
         }
 
         if (this.isTimedOut(curTime)) {
-            this.disconnect(RakDisconnectReason.TIMED_OUT);
+            this.disconnect(TransportDisconnectReason.TIMED_OUT);
             return;
         }
 
@@ -649,24 +667,54 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 continue;
             }
 
-            for (int i = range.start; i <= range.end; i++) {
-                RakDatagramPacket datagram = this.sentDatagrams.remove(i);
-                if (datagram != null) {
-                    if (nack) {
-                        this.onIncomingNack(ctx, datagram, curTime);
-                    } else {
-                        this.onIncomingAck(datagram, curTime);
-                    }
+            removeAcknowledged(this.sentDatagrams, range.start, range.end, datagram -> {
+                if (nack) {
+                    this.onIncomingNack(ctx, datagram, curTime);
+                } else {
+                    this.onIncomingAck(datagram, curTime);
                 }
-            }
+            });
+        }
+    }
+
+    /**
+     * Removes the in-flight datagrams in {@code [start, end]} and passes each to {@code action} in sequence order.
+     */
+    static void removeAcknowledged(NavigableMap<Integer, RakDatagramPacket> sentDatagrams, int start, int end,
+                                   Consumer<RakDatagramPacket> action) {
+        // Polled rather than iterated, as a NACK resends through action, which adds the datagram back under a new index
+        NavigableMap<Integer, RakDatagramPacket> range = sentDatagrams.subMap(start, true, end, true);
+        Map.Entry<Integer, RakDatagramPacket> entry;
+        while ((entry = range.pollFirstEntry()) != null) {
+            action.accept(entry.getValue());
         }
     }
 
     private void onIncomingAck(RakDatagramPacket datagram, long curTime) {
         try {
-            this.slidingWindow.onAck(curTime, datagram, this.datagramReadIndex);
+            this.slidingWindow.onAck(curTime, datagram, this.datagramWriteIndex);
+            this.acknowledgeReliable(datagram);
         } finally {
             datagram.release();
+        }
+    }
+
+    private void acknowledgeReliable(RakDatagramPacket datagram) {
+        for (EncapsulatedPacket packet : datagram.getPackets()) {
+            if (!packet.getReliability().isReliable()) {
+                continue;
+            }
+            this.reliableWindow.set(packet.getReliabilityIndex() - this.reliableWindowStart, false);
+            if (packet.isSplit()) {
+                int[] unacknowledged = this.splitsInFlight.get(packet.getPartId());
+                if (unacknowledged != null && --unacknowledged[0] == 0) {
+                    this.splitsInFlight.remove(packet.getPartId());
+                }
+            }
+        }
+        while (!this.reliableWindow.isEmpty() && !this.reliableWindow.peek()) {
+            this.reliableWindow.poll();
+            this.reliableWindowStart++;
         }
     }
 
@@ -688,7 +736,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         int resendCount = 0;
         int transmissionBandwidth = this.slidingWindow.getRetransmissionBandwidth();
 
-        IntObjectMap<RakDatagramPacket> sent = new IntObjectHashMap<>();
+        Map<Integer, RakDatagramPacket> sent = new HashMap<>();
         Iterator<RakDatagramPacket> iterator = this.sentDatagrams.values().iterator();
         while (iterator.hasNext()) {
             RakDatagramPacket datagram = iterator.next();
@@ -710,9 +758,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 this.sendDatagram(ctx, datagram, curTime, sent);
             }
         }
-        for (IntObjectMap.PrimitiveEntry<RakDatagramPacket> entry : sent.entries()) {
-            this.sentDatagrams.put(entry.key(), entry.value());
-        }
+        this.sentDatagrams.putAll(sent);
 
         if (hasResent) {
             this.slidingWindow.onResend(this.datagramWriteIndex);
@@ -728,12 +774,21 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         int transmissionBandwidth = this.slidingWindow.getTransmissionBandwidth();
         RakDatagramPacket datagram = RakDatagramPacket.newInstance();
-        datagram.setSendTime(curTime);
         EncapsulatedPacket packet;
 
         while ((packet = this.outgoingPackets.peek()) != null) {
             int size = packet.getSize();
             if (transmissionBandwidth < size) {
+                break;
+            }
+            if (packet.getReliability().isReliable() && this.reliableWindow.size() >= RELIABLE_WINDOW_SIZE) {
+                // The peer would drop it, so wait for acknowledgements
+                break;
+            }
+            if (packet.isSplit() && packet.getReliability().isReliable()
+                    && this.splitsInFlight.size() >= MAXIMUM_SPLITS_IN_FLIGHT
+                    && !this.splitsInFlight.containsKey(packet.getPartId())) {
+                // Likewise for a new split message, so wait for one in flight to complete
                 break;
             }
 
@@ -746,11 +801,11 @@ public class RakSessionCodec extends ChannelDuplexHandler {
                 this.sendDatagram(ctx, datagram, curTime, this.sentDatagrams);
 
                 datagram = RakDatagramPacket.newInstance();
-                datagram.setSendTime(curTime);
                 if (!datagram.tryAddPacket(packet, mtuSize)) {
                     throw new IllegalArgumentException("Packet too large to fit in MTU (size: " + packet.getSize() + ", MTU: " + mtuSize + ")");
                 }
             }
+            this.trackSent(packet);
         }
 
         if (!datagram.getPackets().isEmpty()) {
@@ -762,16 +817,29 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         long curTime = System.currentTimeMillis();
         for (EncapsulatedPacket packet : packets) {
             RakDatagramPacket datagram = RakDatagramPacket.newInstance();
-            datagram.setSendTime(curTime);
             if (!datagram.tryAddPacket(packet, this.getMtu())) {
                 throw new IllegalArgumentException("Packet too large to fit in MTU (size: " + packet.getSize() + ", MTU: " + this.getMtu() + ")");
             }
+            // Bypasses the reliable window and split limit, as it bypasses congestion control
+            this.trackSent(packet);
             this.sendDatagram(ctx, datagram, curTime, this.sentDatagrams);
         }
         ctx.flush();
     }
 
-    private void sendDatagram(ChannelHandlerContext ctx, RakDatagramPacket datagram, long time, IntObjectMap<RakDatagramPacket> sent) {
+    // Indices are assigned on send rather than on write, so they go out in order whatever the priority
+    private void trackSent(EncapsulatedPacket packet) {
+        if (!packet.getReliability().isReliable()) {
+            return;
+        }
+        packet.setReliabilityIndex(this.reliabilityWriteIndex++);
+        this.reliableWindow.add(true);
+        if (packet.isSplit() && !this.splitsInFlight.containsKey(packet.getPartId())) {
+            this.splitsInFlight.put(packet.getPartId(), new int[]{packet.getPartCount()});
+        }
+    }
+
+    private void sendDatagram(ChannelHandlerContext ctx, RakDatagramPacket datagram, long time, Map<Integer, RakDatagramPacket> sent) {
         if (datagram.getPackets().isEmpty()) {
             throw new IllegalArgumentException("RakNetDatagram with no packets");
         }
@@ -783,6 +851,8 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
         int oldIndex = datagram.getSequenceIndex();
         datagram.setSequenceIndex(this.datagramWriteIndex++);
+        // Restamped on resends, as an ACK for the new sequence index can only answer this transmission
+        datagram.setSendTime(time);
 
         for (EncapsulatedPacket packet : datagram.getPackets()) {
             // Check if packet is reliable so it can be resent later if a NAK is received.
@@ -803,7 +873,7 @@ public class RakSessionCodec extends ChannelDuplexHandler {
     }
 
     private EncapsulatedPacket[] createEncapsulated(RakMessage rakMessage) {
-        int maxLength = this.getMtu() - MAXIMUM_ENCAPSULATED_HEADER_SIZE - RAKNET_DATAGRAM_HEADER_SIZE;
+        int maxLength = partSize(this.getMtu());
 
         ByteBuf[] buffers;
         int splitId = 0;
@@ -827,6 +897,11 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             }
 
             int split = ((buffer.readableBytes() - 1) / maxLength) + 1;
+            if (split > MAXIMUM_SPLIT_COUNT) {
+                // Refused before taking a split ID or ordering index, so the session carries on
+                throw new IllegalArgumentException("Message of " + buffer.readableBytes() + " bytes needs " + split
+                        + " parts, more than the " + MAXIMUM_SPLIT_COUNT + " allowed");
+            }
             buffer.retain(split);
 
             buffers = new ByteBuf[split];
@@ -860,9 +935,6 @@ public class RakSessionCodec extends ChannelDuplexHandler {
             packet.setOrderingIndex(orderingIndex);
             // packet.setSequenceIndex(sequencingIndex);
             packet.setReliability(reliability);
-            if (reliability.isReliable()) {
-                packet.setReliabilityIndex(this.reliabilityWriteIndex++);
-            }
 
             if (parts > 1) {
                 packet.setSplit(true);
@@ -892,21 +964,33 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         return next;
     }
 
+    /**
+     * Sends a disconnect notification to the peer, then closes the channel. Fires no {@link TransportDisconnectReason},
+     * as the caller already knows why it disconnects. {@link Channel#disconnect()} behaves the same.
+     */
     public void disconnect() {
-        this.disconnect(RakDisconnectReason.DISCONNECTED);
+        this.disconnect(TransportDisconnectReason.DISCONNECTED, false);
     }
 
-    public void disconnect(RakDisconnectReason reason) {
+    /**
+     * Like {@link #disconnect()}, but fires {@code reason} as a user event before closing.
+     */
+    public void disconnect(TransportDisconnectReason reason) {
+        this.disconnect(reason, true);
+    }
+
+    private void disconnect(TransportDisconnectReason reason, boolean fireEvent) {
         // Ensure we disconnect on the right thread
         if (this.channel.eventLoop().inEventLoop()) {
-            this.disconnect0(reason);
+            this.disconnect0(reason, fireEvent);
         } else {
-            this.channel.eventLoop().execute(() -> this.disconnect0(reason));
+            this.channel.eventLoop().execute(() -> this.disconnect0(reason, fireEvent));
         }
     }
 
-    private ChannelPromise disconnect0(RakDisconnectReason reason) {
-        if (this.state == RakState.UNCONNECTED || this.state == RakState.DISCONNECTING) {
+    private ChannelPromise disconnect0(TransportDisconnectReason reason, boolean fireEvent) {
+        // Disconnecting, or already closed
+        if (this.state != RakState.CONNECTED) {
             return this.channel.voidPromise();
         }
         this.setState(RakState.DISCONNECTING);
@@ -916,19 +1000,27 @@ public class RakSessionCodec extends ChannelDuplexHandler {
         }
 
         ChannelHandlerContext ctx = this.ctx();
-
-        ByteBuf buffer = ctx.alloc().ioBuffer(1);
-        buffer.writeByte(ID_DISCONNECTION_NOTIFICATION);
-        RakMessage rakMessage = new RakMessage(buffer, RakReliability.RELIABLE, RakPriority.IMMEDIATE);
-
         ChannelPromise promise = ctx.newPromise();
-        promise.addListener((ChannelFuture future) -> // The channel provided in ChannelFuture is parent channel,
-                this.channel.pipeline().fireUserEventTriggered(reason).close()); // but we want RakChannel instead
-        this.write(ctx, rakMessage, promise);
+        // The channel provided in ChannelFuture is parent channel, but we want RakChannel instead
+        promise.addListener((ChannelFuture future) -> {
+            if (fireEvent) {
+                this.channel.pipeline().fireUserEventTriggered(reason);
+            }
+            this.channel.close();
+        });
+        try {
+            ByteBuf buffer = ctx.alloc().ioBuffer(1);
+            buffer.writeByte(ID_DISCONNECTION_NOTIFICATION);
+            this.write(ctx, new RakMessage(buffer, RakReliability.RELIABLE, RakPriority.IMMEDIATE), promise);
+        } catch (Throwable t) {
+            log.warn("[{}] Failed to send disconnect notification, closing without it", this.getRemoteAddress(), t);
+            // The listener closes on failure too, so a lost notification cannot strand the session in DISCONNECTING
+            promise.tryFailure(t);
+        }
         return promise;
     }
 
-    public void close(RakDisconnectReason reason) {
+    public void close(TransportDisconnectReason reason) {
         if (this.state == RakState.DISCONNECTING) {
             return;
         }
@@ -1012,6 +1104,25 @@ public class RakSessionCodec extends ChannelDuplexHandler {
 
     public int getMtu() {
         return this.channel.config().getMtu() - UDP_HEADER_SIZE - (this.getRemoteAddress().getAddress() instanceof Inet6Address ? 40 : 20);
+    }
+
+    // Message bytes one split part carries, at an MTU as getMtu reports it
+    private static int partSize(int mtu) {
+        return mtu - MAXIMUM_ENCAPSULATED_HEADER_SIZE - RAKNET_DATAGRAM_HEADER_SIZE;
+    }
+
+    /**
+     * Largest message the session can write, what {@link RakConstants#MAXIMUM_SPLIT_COUNT} parts carry at its MTU.
+     */
+    public int getMaxMessageSize() {
+        return maxMessageSize(this.getMtu());
+    }
+
+    /**
+     * Largest message a session can write at an MTU less the UDP and IP headers, as {@link #getMtu()} reports it.
+     */
+    public static int maxMessageSize(int mtu) {
+        return MAXIMUM_SPLIT_COUNT * partSize(mtu);
     }
 
     public RakChannelMetrics getMetrics() {

@@ -20,6 +20,7 @@ plugins {
     id("org.gradle.toolchains.foojay-resolver-convention") version "1.0.0"
 }
 
+include("transport-common")
 include("transport-raknet")
 include("codec-query")
 include("codec-rcon")

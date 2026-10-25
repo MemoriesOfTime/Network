@@ -37,6 +37,18 @@ public class RakConstants {
      * Maximum size of an {@link EncapsulatedPacket} header.
      */
     public static final int MAXIMUM_ENCAPSULATED_HEADER_SIZE = 28;
+    /**
+     * Most parts a sent split message may have. A Bedrock client drops a larger message after acknowledging all of
+     * its parts, so it is never resent and its ordering channel stalls.
+     */
+    public static final int MAXIMUM_SPLIT_COUNT = 2048;
+    /**
+     * Most parts a received split message may have. Higher than {@link #MAXIMUM_SPLIT_COUNT} on purpose: peers that
+     * do not cap what they send keep working, and it costs nothing, as
+     * {@link org.cloudburstmc.netty.channel.raknet.config.RakChannelOption#RAK_MAX_SPLIT_QUEUED_BYTES} bounds what
+     * reassembly holds either way.
+     */
+    public static final int MAXIMUM_RECEIVED_SPLIT_COUNT = 8192;
 
     public static final int UDP_HEADER_SIZE = 8;
 
@@ -113,6 +125,21 @@ public class RakConstants {
     public static final long CC_MAXIMUM_THRESHOLD = 2000;
     public static final long CC_ADDITIONAL_VARIANCE = 30;
     public static final long CC_SYN = 10;
+    /**
+     * Reliable messages that may be in flight from the lowest unacknowledged one on. A Bedrock client drops a
+     * message more than 32768 past its lowest missing one, or past 4097 waiting out of order on its ordering channel.
+     * It acknowledges the datagram first, so the message is never resent and the channel stalls.
+     * <p>
+     * The window is sized for the second limit. Each split part counts as a reliable message but a split message
+     * waits as one, so the window cannot tell 32768 split parts, which the client takes, from 32768 small messages,
+     * which overflow its ordering channel. At most 4095 can wait behind a missing message.
+     */
+    public static final int RELIABLE_WINDOW_SIZE = 4096;
+    /**
+     * Split messages that may be in flight at once. A Bedrock client reassembles at most this many, and drops the
+     * parts of any further one after acknowledging them, so the message is never resent and its channel stalls.
+     */
+    public static final int MAXIMUM_SPLITS_IN_FLIGHT = 256;
 
 
     /*

@@ -22,7 +22,7 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.cloudburstmc.netty.channel.raknet.RakConstants;
-import org.cloudburstmc.netty.channel.raknet.RakDisconnectReason;
+import org.cloudburstmc.netty.channel.TransportDisconnectReason;
 import org.cloudburstmc.netty.channel.raknet.packet.EncapsulatedPacket;
 import org.cloudburstmc.netty.handler.codec.raknet.AdvancedChannelInboundHandler;
 
@@ -50,7 +50,7 @@ public class DisconnectNotificationHandler extends AdvancedChannelInboundHandler
         if (log.isTraceEnabled()) {
             log.trace("RakNet Session ({} => {}) by remote peer!", ctx.channel().localAddress(), ctx.channel().remoteAddress());
         }
-        ctx.fireUserEventTriggered(RakDisconnectReason.CLOSED_BY_REMOTE_PEER);
-        ctx.fireChannelInactive();
+        // Close the RakChannel itself, as nothing else closes a client channel on a remote disconnect
+        ctx.pipeline().get(RakSessionCodec.class).close(TransportDisconnectReason.CLOSED_BY_REMOTE_PEER);
     }
 }

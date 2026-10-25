@@ -16,12 +16,10 @@
 
 package org.cloudburstmc.netty.channel.raknet;
 
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.ServerChannel;
 import io.netty.channel.socket.DatagramChannel;
-import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.PromiseCombiner;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -145,14 +143,14 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         }
 
         RakChildChannel channel = new RakChildChannel(address, localAddress, clientAddress, this, clientGuid, mtu, childConsumer);
-        channel.closeFuture().addListener((GenericFutureListener<ChannelFuture>) this::onChildClosed);
         // Set before fireChannelRead because initChannel runs async on the child worker thread.
         if (protocolVersion != 0) {
             channel.config().setOption(RakChannelOption.RAK_PROTOCOL_VERSION, protocolVersion);
         }
+        // Map before firing, as initChannel may close the channel inline and onChildClosed must unmap it.
+        this.childChannelMap.put(address, channel);
         // Fire channel thought ServerBootstrap,
         // register to eventLoop, assign default options and attributes
-        this.childChannelMap.put(address, channel);
         try {
             this.pipeline().fireChannelRead(channel).fireChannelReadComplete();
         } catch (Throwable t) {
@@ -164,11 +162,6 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
             }
             throw t;
         }
-        if (!channel.isOpen()) {
-            this.childChannelMap.remove(address, channel);
-            return ChildChannelCreationResult.alreadyConnected();
-        }
-
         if (this.config().getMetrics() != null) {
             this.config().getMetrics().channelOpen(clientAddress);
         }
@@ -187,14 +180,8 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         return this.childChannelMap.get(address);
     }
 
-    void onChildClosing(RakChildChannel channel) {
-        // Release the slot as soon as the child starts closing so new handshakes are not rejected while the
-        // closeFuture listener is still pending.
-        this.childChannelMap.remove(channel.remoteOrProxyAddress(), channel);
-    }
-
-    private void onChildClosed(ChannelFuture channelFuture) {
-        RakChildChannel channel = (RakChildChannel) channelFuture.channel();
+    void onChildClosed(RakChildChannel channel) {
+        // A replacement for the same address may already be mapped
         this.childChannelMap.remove(channel.remoteOrProxyAddress(), channel);
 
         if (this.config().getMetrics() != null) {

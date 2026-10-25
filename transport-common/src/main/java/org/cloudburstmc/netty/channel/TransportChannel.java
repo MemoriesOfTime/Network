@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 CloudburstMC
+ * Copyright 2026 CloudburstMC
  *
  * CloudburstMC licenses this file to you under the Apache License,
  * version 2.0 (the "License"); you may not use this file except in compliance
@@ -14,20 +14,22 @@
  * under the License.
  */
 
-package org.cloudburstmc.netty.channel.raknet;
+package org.cloudburstmc.netty.channel;
 
-public enum RakDisconnectReason {
-    CLOSED_BY_REMOTE_PEER,
-    SHUTTING_DOWN,
-    DISCONNECTED,
-    TIMED_OUT,
-    CONNECTION_REQUEST_FAILED,
-    ALREADY_CONNECTED,
-    NO_FREE_INCOMING_CONNECTIONS,
-    INCOMPATIBLE_PROTOCOL_VERSION,
-    IP_RECENTLY_CONNECTED,
-    BAD_PACKET,
-    QUEUE_TOO_LONG,
-    SPLIT_QUEUE_TOO_LONG,
-    ORDERING_QUEUE_TOO_LONG
+import io.netty.channel.Channel;
+
+/**
+ * A channel of one of the transports, carrying each message written to it whole.
+ */
+public interface TransportChannel extends Channel {
+
+    /**
+     * Largest message a write may carry. Larger writes fail, as the peer would drop them.
+     */
+    int maxMessageSize();
+
+    /**
+     * Round trip time to the peer in milliseconds, or {@code 0} while it is unknown.
+     */
+    long getPing();
 }
