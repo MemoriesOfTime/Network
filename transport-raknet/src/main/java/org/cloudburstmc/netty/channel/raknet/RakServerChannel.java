@@ -18,6 +18,7 @@ package org.cloudburstmc.netty.channel.raknet;
 
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
+import io.netty.channel.EventLoop;
 import io.netty.channel.ServerChannel;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.util.concurrent.PromiseCombiner;
@@ -36,7 +37,6 @@ import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerOfflineHandle
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRateLimiter;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerRouteHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerTailHandler;
-import org.cloudburstmc.netty.util.RakUtils;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -152,6 +152,9 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
         // Fire channel thought ServerBootstrap,
         // register to eventLoop, assign default options and attributes
         try {
+            if (this.config().getMetrics() != null) {
+                this.config().getMetrics().channelOpen(clientAddress);
+            }
             this.pipeline().fireChannelRead(channel).fireChannelReadComplete();
         } catch (Throwable t) {
             this.childChannelMap.remove(address, channel);
@@ -161,9 +164,6 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
                 log.warn("Failed to close rejected child channel {}", channel, closeCause);
             }
             throw t;
-        }
-        if (this.config().getMetrics() != null) {
-            this.config().getMetrics().channelOpen(clientAddress);
         }
         return ChildChannelCreationResult.success(channel);
     }
@@ -188,15 +188,12 @@ public class RakServerChannel extends ProxyChannel<DatagramChannel> implements S
             this.config().getMetrics().channelClose(channel.remoteAddress());
         }
 
-        Runnable destroyTask = () -> {
-            channel.rakPipeline().fireChannelInactive();
-            channel.rakPipeline().fireChannelUnregistered();
-            RakUtils.destroyChannelPipeline(channel.rakPipeline());
-        };
-        if (channel.eventLoop().inEventLoop()) {
+        Runnable destroyTask = channel::destroyRakPipeline;
+        EventLoop eventLoop = channel.eventLoopOrNull();
+        if (eventLoop == null || eventLoop.inEventLoop()) {
             destroyTask.run();
         } else {
-            channel.eventLoop().execute(destroyTask);
+            eventLoop.execute(destroyTask);
         }
 
         if (this.config().getThrottle() != null) {

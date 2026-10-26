@@ -97,7 +97,7 @@ public class RakAcknowledgeHandler extends SimpleChannelInboundHandler<ByteBuf> 
             if (log.isTraceEnabled()) {
                 log.trace("{} sent an IntRange with a start value {} greater than an end value of {}", sessionCodec.getChannel().remoteAddress(), start, end);
             }
-            this.sessionCodec.disconnect(TransportDisconnectReason.BAD_PACKET);
+            this.sessionCodec.close(TransportDisconnectReason.BAD_PACKET);
             return;
         }
 

@@ -18,6 +18,7 @@ package org.cloudburstmc.netty.channel.raknet;
 
 import io.netty.channel.*;
 import io.netty.util.ReferenceCountUtil;
+import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.cloudburstmc.netty.channel.raknet.config.DefaultChannelToServerProxyMetrics;
@@ -27,6 +28,7 @@ import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
 import org.cloudburstmc.netty.handler.codec.raknet.common.*;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakChildDatagramHandler;
 import org.cloudburstmc.netty.handler.codec.raknet.server.RakServerOnlineInitialHandler;
+import org.cloudburstmc.netty.util.RakUtils;
 
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -49,6 +51,8 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     private final DefaultChannelPipeline rakPipeline;
     private final AtomicInteger pendingRoutedDatagrams = new AtomicInteger();
     private final AtomicLong pendingRoutedBytes = new AtomicLong();
+    private volatile boolean rakPipelineRegistered;
+    private volatile boolean rakPipelineActive;
     private volatile boolean open = true;
     private volatile boolean active;
 
@@ -87,6 +91,26 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     @Override
     public ChannelPipeline rakPipeline() {
         return rakPipeline;
+    }
+
+    EventLoop eventLoopOrNull() {
+        try {
+            return this.eventLoop();
+        } catch (IllegalStateException ignored) {
+            return null;
+        }
+    }
+
+    void destroyRakPipeline() {
+        if (this.rakPipelineActive) {
+            this.rakPipeline.fireChannelInactive();
+            this.rakPipelineActive = false;
+        }
+        if (this.rakPipelineRegistered) {
+            this.rakPipeline.fireChannelUnregistered();
+            this.rakPipelineRegistered = false;
+        }
+        RakUtils.destroyChannelPipeline(this.rakPipeline);
     }
 
     @Override
@@ -182,7 +206,9 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
     @Override
     protected void doRegister(ChannelPromise promise) {
         try {
+            this.rakPipelineRegistered = true;
             this.rakPipeline.fireChannelRegistered();
+            this.rakPipelineActive = true;
             this.rakPipeline.fireChannelActive();
             promise.setSuccess();
         } catch (Throwable t) {
@@ -237,6 +263,25 @@ public class RakChildChannel extends AbstractChannel implements RakChannel {
             // The server's event loop is shutting down, so close without notifying
             this.close();
         }
+    }
+
+    @Override
+    public ChannelFuture close() {
+        if (this.eventLoopOrNull() != null) {
+            return this.pipeline().close();
+        }
+        ChannelPromise promise = new DefaultChannelPromise(this, ImmediateEventExecutor.INSTANCE);
+        this.unsafe().close(promise);
+        return promise;
+    }
+
+    @Override
+    public ChannelFuture close(ChannelPromise promise) {
+        if (this.eventLoopOrNull() != null) {
+            return this.pipeline().close(promise);
+        }
+        this.unsafe().close(promise);
+        return promise;
     }
 
     @Override

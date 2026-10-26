@@ -32,6 +32,8 @@ import io.netty.util.ReferenceCountUtil;
 import org.cloudburstmc.netty.channel.TransportDisconnectReason;
 import org.cloudburstmc.netty.channel.raknet.*;
 import org.cloudburstmc.netty.channel.raknet.config.RakChannelOption;
+import org.cloudburstmc.netty.channel.raknet.config.RakServerMetrics;
+import org.cloudburstmc.netty.channel.raknet.config.RakServerThrottle;
 import org.cloudburstmc.netty.channel.raknet.packet.EncapsulatedPacket;
 import org.cloudburstmc.netty.channel.raknet.packet.RakDatagramPacket;
 import org.cloudburstmc.netty.channel.raknet.packet.RakMessage;
@@ -72,6 +74,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -196,6 +199,35 @@ public class RakTests {
         Field childChannelMapField = RakServerChannel.class.getDeclaredField("childChannelMap");
         childChannelMapField.setAccessible(true);
         return (Map<SocketAddress, RakChildChannel>) childChannelMapField.get(server);
+    }
+
+    private void trackChildCloseCallbacks(RakServerChannel server, AtomicInteger metricCloses, AtomicInteger throttleCloses) {
+        server.config().setMetrics(new RakServerMetrics() {
+            @Override
+            public void channelClose(InetSocketAddress address) {
+                metricCloses.incrementAndGet();
+            }
+        });
+        server.config().setThrottle(new RakServerThrottle() {
+            @Override
+            public boolean accept(InetSocketAddress address) {
+                return true;
+            }
+
+            @Override
+            public void closed(InetSocketAddress address) {
+                throttleCloses.incrementAndGet();
+            }
+        });
+    }
+
+    private void assertChildClosedAndCleanedUp(RakServerChannel server, RakChildChannel child, SocketAddress remoteAddress,
+                                               AtomicInteger metricCloses, AtomicInteger throttleCloses) {
+        Assertions.assertFalse(child.isOpen());
+        Assertions.assertNull(server.getChildChannel(remoteAddress));
+        Assertions.assertNull(child.rakPipeline().get(RakSessionCodec.class));
+        Assertions.assertEquals(1, metricCloses.get());
+        Assertions.assertEquals(1, throttleCloses.get());
     }
 
     private RakChildChannel registerChildChannel(RakChildChannel child) {
@@ -428,33 +460,131 @@ public class RakTests {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
-    public void testClosingChildChannelImmediatelyReleasesCapacity() throws Exception {
+    public void testClosingUnregisteredChildReleasesCapacityAndCleansUp() throws Exception {
         RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
-        server.config().setOption(RakChannelOption.RAK_MAX_CONNECTIONS, 1);
+        try {
+            server.config().setOption(RakChannelOption.RAK_MAX_CONNECTIONS, 1);
+            AtomicInteger metricCloses = new AtomicInteger();
+            AtomicInteger throttleCloses = new AtomicInteger();
+            this.trackChildCloseCallbacks(server, metricCloses, throttleCloses);
 
-        InetSocketAddress firstAddress = new InetSocketAddress("127.0.0.1", 19132);
-        RakChildChannel child = newChildChannel(
-                server,
-                firstAddress,
-                new InetSocketAddress("127.0.0.1", 19132));
+            InetSocketAddress firstAddress = new InetSocketAddress("127.0.0.1", 19132);
+            RakChildChannel child = this.newChildChannel(server, firstAddress, firstAddress);
+            this.childChannelMap(server).put(firstAddress, child);
+            Assertions.assertFalse(child.isRegistered());
 
-        Field childChannelMapField = RakServerChannel.class.getDeclaredField("childChannelMap");
-        childChannelMapField.setAccessible(true);
-        Map<InetSocketAddress, RakChildChannel> childChannelMap =
-                (Map<InetSocketAddress, RakChildChannel>) childChannelMapField.get(server);
-        childChannelMap.put(firstAddress, child);
+            InetSocketAddress secondAddress = new InetSocketAddress("127.0.0.1", 19133);
+            Assertions.assertFalse(server.hasCapacityFor(secondAddress),
+                    "Server should report no capacity before the existing child starts closing");
 
-        InetSocketAddress secondAddress = new InetSocketAddress("127.0.0.1", 19133);
-        Assertions.assertFalse(server.hasCapacityFor(secondAddress),
-                "Server should report no capacity before the existing child starts closing");
+            ChannelFuture closeFuture = child.close();
+            Assertions.assertTrue(closeFuture.awaitUninterruptibly(5, TimeUnit.SECONDS));
+            Assertions.assertTrue(closeFuture.isSuccess());
+            this.assertChildClosedAndCleanedUp(server, child, firstAddress, metricCloses, throttleCloses);
+            Assertions.assertTrue(server.hasCapacityFor(secondAddress),
+                    "Server should release capacity as soon as the child enters doClose()");
+        } finally {
+            server.parent().unsafe().closeForcibly();
+        }
+    }
 
-        Method doClose = RakChildChannel.class.getDeclaredMethod("doClose");
-        doClose.setAccessible(true);
-        doClose.invoke(child);
+    @Test
+    public void testForceClosedUnregisteredChildCleansUp() throws Exception {
+        RakServerChannel server = (RakServerChannel) this.track(new ServerBootstrap()
+                .channelFactory(RakChannelFactory.server(NioDatagramChannel.class))
+                .group(this.serverParentGroup, this.serverChildGroup)
+                .childOption(RakChannelOption.RAK_MAX_CHANNELS, 0)
+                .childHandler(new ChannelInboundHandlerAdapter())
+                .bind(new InetSocketAddress("127.0.0.1", 0))
+                .syncUninterruptibly()
+                .channel());
+        AtomicInteger metricCloses = new AtomicInteger();
+        AtomicInteger throttleCloses = new AtomicInteger();
+        this.trackChildCloseCallbacks(server, metricCloses, throttleCloses);
 
-        Assertions.assertTrue(server.hasCapacityFor(secondAddress),
-                "Server should release capacity as soon as the child enters doClose()");
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        RakServerChannel.ChildChannelCreationResult result = server.eventLoop()
+                .submit(() -> server.createChildChannel(
+                        remoteAddress, server.localAddress(), 12345L, RakConstants.MAXIMUM_MTU_SIZE, 11))
+                .get(5, TimeUnit.SECONDS);
+        RakChildChannel child = result.channel();
+
+        Assertions.assertNotNull(child);
+        Assertions.assertFalse(child.isRegistered());
+        this.assertChildClosedAndCleanedUp(server, child, remoteAddress, metricCloses, throttleCloses);
+    }
+
+    @Test
+    public void testServerCloseBeforeChildRegistrationCleansUp() throws Exception {
+        AtomicReference<RakChildChannel> childRef = new AtomicReference<>();
+        AtomicReference<ChannelFuture> serverCloseRef = new AtomicReference<>();
+        RakServerChannel server = (RakServerChannel) this.track(new ServerBootstrap()
+                .channelFactory(RakChannelFactory.server(NioDatagramChannel.class))
+                .group(this.serverParentGroup, this.serverChildGroup)
+                .handler(new ChannelInboundHandlerAdapter() {
+                    @Override
+                    public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                        if (msg instanceof RakChildChannel) {
+                            childRef.set((RakChildChannel) msg);
+                            serverCloseRef.set(ctx.channel().close());
+                            return;
+                        }
+                        ctx.fireChannelRead(msg);
+                    }
+                })
+                .childHandler(new ChannelInboundHandlerAdapter())
+                .bind(new InetSocketAddress("127.0.0.1", 0))
+                .syncUninterruptibly()
+                .channel());
+        AtomicInteger metricCloses = new AtomicInteger();
+        AtomicInteger throttleCloses = new AtomicInteger();
+        this.trackChildCloseCallbacks(server, metricCloses, throttleCloses);
+
+        InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+        server.eventLoop().submit(() -> server.createChildChannel(
+                remoteAddress, server.localAddress(), 12345L, RakConstants.MAXIMUM_MTU_SIZE, 11))
+                .get(5, TimeUnit.SECONDS);
+
+        RakChildChannel child = childRef.get();
+        Assertions.assertNotNull(child);
+        Assertions.assertFalse(child.isRegistered());
+        Assertions.assertTrue(child.closeFuture().awaitUninterruptibly(5, TimeUnit.SECONDS));
+        Assertions.assertTrue(child.closeFuture().isSuccess());
+        this.assertChildClosedAndCleanedUp(server, child, remoteAddress, metricCloses, throttleCloses);
+
+        ChannelFuture serverClose = serverCloseRef.get();
+        Assertions.assertNotNull(serverClose);
+        Assertions.assertTrue(serverClose.awaitUninterruptibly(5, TimeUnit.SECONDS));
+        Assertions.assertTrue(serverClose.isSuccess());
+    }
+
+    @Test
+    public void testRejectedUnregisteredChildCleansUp() throws Exception {
+        AtomicReference<RakChildChannel> childRef = new AtomicReference<>();
+        IllegalStateException readFailure = new IllegalStateException("Failed to forward child channel");
+        RakServerChannel server = new RakServerChannel(
+                new NioDatagramChannel(), channel -> childRef.set((RakChildChannel) channel)) {
+            @Override
+            public ChannelPipeline pipeline() {
+                throw readFailure;
+            }
+        };
+        try {
+            AtomicInteger metricCloses = new AtomicInteger();
+            AtomicInteger throttleCloses = new AtomicInteger();
+            this.trackChildCloseCallbacks(server, metricCloses, throttleCloses);
+            InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
+
+            IllegalStateException thrown = Assertions.assertThrows(IllegalStateException.class,
+                    () -> server.createChildChannel(
+                            remoteAddress, remoteAddress, 12345L, RakConstants.MAXIMUM_MTU_SIZE, 11));
+
+            Assertions.assertSame(readFailure, thrown);
+            this.assertChildClosedAndCleanedUp(
+                    server, childRef.get(), remoteAddress, metricCloses, throttleCloses);
+        } finally {
+            server.parent().unsafe().closeForcibly();
+        }
     }
 
     @Test
@@ -472,6 +602,18 @@ public class RakTests {
                 .bind(new InetSocketAddress("127.0.0.1", 0))
                 .syncUninterruptibly()
                 .channel());
+        List<String> metricEvents = new ArrayList<>();
+        server.config().setMetrics(new RakServerMetrics() {
+            @Override
+            public void channelOpen(InetSocketAddress address) {
+                metricEvents.add("open");
+            }
+
+            @Override
+            public void channelClose(InetSocketAddress address) {
+                metricEvents.add("close");
+            }
+        });
 
         InetSocketAddress remoteAddress = new InetSocketAddress("127.0.0.1", 30000);
         InetSocketAddress localAddress = server.localAddress();
@@ -487,6 +629,8 @@ public class RakTests {
                 "Child closed during initialization should not remain in the server route map");
         Assertions.assertTrue(server.hasCapacityFor(new InetSocketAddress("127.0.0.1", 30001)),
                 "Closed initialization child should not consume max-connection capacity");
+        Assertions.assertEquals(List.of("open", "close"), metricEvents,
+                "Metrics should report channel open before an inline close");
     }
 
     @Test
@@ -908,6 +1052,42 @@ public class RakTests {
         }
     }
 
+    @Test
+    public void testReversedAcknowledgeRangeClosesWithoutDisconnectNotification() throws Exception {
+        RakServerChannel server = new RakServerChannel(new NioDatagramChannel());
+        RakChildChannel child = newChildChannel(
+                server,
+                new InetSocketAddress("127.0.0.1", 19132),
+                new InetSocketAddress("127.0.0.1", 19132));
+        AtomicReference<TransportDisconnectReason> closeReason = new AtomicReference<>();
+        AtomicBoolean disconnectCalled = new AtomicBoolean();
+        RakSessionCodec sessionCodec = new RakSessionCodec(child) {
+            @Override
+            public void close(TransportDisconnectReason reason) {
+                closeReason.set(reason);
+            }
+
+            @Override
+            public void disconnect(TransportDisconnectReason reason) {
+                disconnectCalled.set(true);
+            }
+        };
+        this.setSessionField(sessionCodec, "incomingAcks", new ArrayDeque<>());
+        EmbeddedChannel channel = new EmbeddedChannel(new RakAcknowledgeHandler(sessionCodec));
+        ByteBuf ack = Unpooled.buffer(10)
+                .writeByte(RakConstants.FLAG_VALID | RakConstants.FLAG_ACK)
+                .writeShort(1)
+                .writeBoolean(false)
+                .writeMediumLE(2)
+                .writeMediumLE(1);
+
+        channel.writeInbound(ack);
+
+        Assertions.assertEquals(TransportDisconnectReason.BAD_PACKET, closeReason.get());
+        Assertions.assertFalse(disconnectCalled.get(),
+                "A reversed acknowledge range should close without sending a disconnect notification");
+        channel.finishAndReleaseAll();
+    }
 
     @Test
     public void testClientClosesOnRemoteDisconnect() throws InterruptedException {
